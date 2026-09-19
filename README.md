@@ -69,7 +69,7 @@ make app BUILD_NUMBER=202609191  # 显式构建号（分享出去的包建议这
 make app COPYRIGHT="© 2026 Drswith"        # 访达“显示简介”中的版权信息
 ```
 
-payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查。pnpm 在可选依赖下载失败时只会跳过、不报错，所以安装后会对照锁文件确认当前架构的平台专属包全部到位，缺任何一个都会让构建失败。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。payload 只在锁文件、版本或签名身份变化时重建（`FORCE=1` 强制重建）。
+payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查。pnpm 在可选依赖下载失败时只会跳过、不报错，所以安装后会对照锁文件确认当前架构的平台专属包全部到位，缺任何一个都会让构建失败。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。payload 只在锁文件或版本变化时重建（`FORCE=1` 强制重建）。
 
 ### CI
 
@@ -89,21 +89,23 @@ git tag v0.2.0 && git push origin v0.2.0
 
 ### 签名
 
+只签外层 `DSH Launcher.app`：签 Swift 可执行文件，并把包里其余文件（包括 `payload/runtime.tar.gz`）的哈希封存进签名。运行时里的 Node 和原生模块不重新签名：
+
+- 它们在 `runtime.tar.gz` 里，对 App 的签名来说只是被封存的数据文件。
+- 解压后 Node 仍是 Node.js 官方的 Developer ID 签名，自带 JIT 和 `disable-library-validation` 权限；原生模块在 arm64 上带链接器生成的 ad hoc 签名，x86_64 上不要求签名。
+- 解压时会清除 quarantine 标记，Gatekeeper 不会检查这些文件。
+
+官方 DSH Desktop 逐个重签，是因为它把运行时目录直接放进 App 并要公证，而官方 Node 带 `get-task-allow` 权限，原样过不了公证。
+
 签名身份放在不提交的 `signing.local.env`（格式见 `signing.local.env.example`），环境变量优先于该文件：
 
 ```bash
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCDE12345)}"
-CODESIGN_TEAM_ID="${CODESIGN_TEAM_ID:-XXXXXXXXXX}"   # 证书的 OU，不是名称括号里的 ID
 ```
 
-做法参考官方桌面端（`apps/desktop/scripts/verify-macos-signature.mjs`、`macos-runtime.ts`）：
+没有这个文件时用 ad hoc 签名；CI 没有证书，发布的包也是 ad hoc 签名。DMG 不签名。
 
-- 运行时里的每个 Mach-O（node、`.node` 原生模块、spawn-helper、ripgrep、libvips 等）先单独签名，全部启用 hardened runtime 并带安全时间戳；Node 额外带 [`node.entitlements`](Resources/Entitlements/node.entitlements)（`allow-jit`、`allow-unsigned-executable-memory`、`disable-library-validation`，与官方桌面端的 Node 相同）。签名后再做冒烟启动，确认 hardened runtime 下能正常运行。
-- App 与 DMG 用同一证书签名。
-- 每次签名后都会校验：`codesign --verify --strict`，签名者（`Authority`）、`TeamIdentifier`、时间戳，以及 hardened runtime 标志，任何一项不符都会让构建失败。
-- 没有 `signing.local.env` 时退回 ad-hoc 签名，只有本机认可。
-
-Apple Development 证书适合本机和开发调试；要让其他 Mac 双击打开，需要 Developer ID Application 证书并完成公证。
+没有公证的 App 在其他 Mac 上第一次打开时，都要到“系统设置 › 隐私与安全性”里点“仍要打开”，用 Apple Development 证书签名也一样。要双击直接打开，需要 Developer ID Application 证书（付费开发者计划）并完成公证。
 
 ### 版本号
 
@@ -180,6 +182,6 @@ Apple Development 证书适合本机和开发调试；要让其他 Mac 双击打
 ## 后续工作
 
 - **发版**：打 tag 时由 CI 构建并上传到 GitHub Releases。dsh 版本随 App 一起发布，不单独热更新运行时。
-- **对外分发**：需要 Developer ID Application 证书（付费开发者计划）并完成公证（`notarytool` 提交、`stapler` 装订）；运行时 Mach-O 的逐个签名已经就绪。
+- **对外分发**：需要 Developer ID Application 证书（付费开发者计划）并完成公证（`notarytool` 提交、`stapler` 装订）。
 - **自更新**：App 可接入 Sparkle；新版本自带的运行时会在启动时自动替换。
 - **可选窗口模式**：用 WKWebView 承载同一 URL，作为浏览器之外的选项。

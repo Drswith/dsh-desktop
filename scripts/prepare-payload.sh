@@ -6,16 +6,14 @@
 # bundled Node with an isolated store and config, a hoisted node_modules, and only
 # the reviewed dependency builds allowed; --frozen-lockfile makes it reproducible.
 source "$(dirname "$0")/config.sh"
-source "$(dirname "$0")/signing.sh"
 source "$(dirname "$0")/toolchain.sh"
-check_signing_identity
 check_locked_version
 
 MANIFEST="$PAYLOAD_DIR/manifest.json"
 PROJECT_FILES=("$RUNTIME_PROJECT/package.json" "$RUNTIME_PROJECT/pnpm-workspace.yaml" "$RUNTIME_PROJECT/pnpm-lock.yaml")
 for file in "${PROJECT_FILES[@]}"; do [ -f "$file" ] || die "missing $file; run: make lock"; done
 PROJECT_HASH="$(cat "${PROJECT_FILES[@]}" | shasum -a 256 | cut -c1-16)"
-IDENTITY="dsh=$LOCKED_DSH_VERSION lock=$PROJECT_HASH node=$NODE_VERSION pnpm=$PNPM_VERSION arch=$ARCH sign=$(signing_label)"
+IDENTITY="dsh=$LOCKED_DSH_VERSION lock=$PROJECT_HASH node=$NODE_VERSION pnpm=$PNPM_VERSION arch=$ARCH"
 
 if [ "${FORCE:-0}" != 1 ] && [ -f "$MANIFEST" ] && [ -f "$PAYLOAD_DIR/build-identity" ] \
   && [ "$(cat "$PAYLOAD_DIR/build-identity")" = "$IDENTITY" ]; then
@@ -65,11 +63,7 @@ EOF
 write_shim dsh '"$runtime/app/node_modules/@deepseek-ai/dsh/lib/bin.js"'
 write_shim pnpm '"$runtime/pnpm/bin/pnpm.mjs"'
 
-# 5b. Sign each Mach-O on its own (Node with JIT entitlements), as the official desktop does.
-sign_runtime_tree "$RUNTIME"
-
-# 6. Verify the installed CLI, then boot the signed runtime once on a scratch home;
-#    this also proves Node runs under the hardened runtime with its entitlements.
+# 6. Verify the installed CLI, then boot the runtime once on a scratch home.
 installed="$("$RUNTIME/bin/dsh" --version)"
 [ "$installed" = "$LOCKED_DSH_VERSION" ] || die "installed dsh reports $installed, expected $LOCKED_DSH_VERSION"
 if [ "${SKIP_SMOKE:-0}" != 1 ]; then

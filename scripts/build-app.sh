@@ -4,8 +4,6 @@
 #   Contents/Resources/payload/          runtime.tar.gz + manifest.json (from prepare-payload.sh)
 #   Contents/Resources/*.lproj, icons    UI resources
 source "$(dirname "$0")/config.sh"
-source "$(dirname "$0")/signing.sh"
-check_signing_identity
 
 log "compiling $EXECUTABLE_NAME (release, $ARCH)"
 swift build --package-path "$ROOT" -c release --arch "$ARCH" --product "$EXECUTABLE_NAME"
@@ -16,8 +14,6 @@ if [ -f "$MANIFEST" ]; then
   payload_arch="$(sed -n 's/^  "arch": "\(.*\)",$/\1/p' "$MANIFEST")"
   [ "$payload_arch" = "$ARCH" ] || die "payload arch $payload_arch does not match ARCH=$ARCH"
   BUNDLED_DSH_VERSION="$(sed -n 's/^  "dshVersion": "\(.*\)",$/\1/p' "$MANIFEST")"
-  grep -qF "sign=$(signing_label)" "$PAYLOAD_DIR/build-identity" 2>/dev/null \
-    || die "the payload was not signed by $(signing_label); rebuild it with scripts/prepare-payload.sh"
 elif [ "${ALLOW_NO_PAYLOAD:-0}" = 1 ]; then
   log "warning: no payload; the app will need \"runtime\" in ~/$HOME_DIR_NAME/config.json"
   BUNDLED_DSH_VERSION="external"
@@ -76,7 +72,12 @@ if [ -f "$MANIFEST" ]; then
     || cp "$MANIFEST" "$PAYLOAD_DIR/runtime.tar.gz" "$CONTENTS/Resources/payload/"
 fi
 
-log "signing $APP_NAME.app ($(signing_label))"
-sign_app "$APP_BUNDLE"
+# Only the app is signed. runtime.tar.gz is sealed data to this signature, and the
+# code inside keeps the signatures it ships with: Node.js's own Developer ID, and
+# the linker's ad hoc signature on arm64 native modules.
+if [ "$CODESIGN_IDENTITY" = - ]; then signer="ad hoc"; else signer="$CODESIGN_IDENTITY"; fi
+log "signing $APP_NAME.app ($signer)"
+codesign --force --sign "$CODESIGN_IDENTITY" --options runtime "$APP_BUNDLE"
+codesign --verify --strict "$APP_BUNDLE"
 
 log "built $APP_BUNDLE ($(du -sh "$APP_BUNDLE" | awk '{ print $1 }'), $APP_VERSION ($BUILD_NUMBER), commit ${GIT_COMMIT:0:12}, dsh $BUNDLED_DSH_VERSION, $ARCH)"

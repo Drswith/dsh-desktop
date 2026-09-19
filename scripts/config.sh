@@ -129,12 +129,11 @@ CACHE_DIR="${CACHE_DIR:-$ROOT/.cache}"
 PAYLOAD_DIR="$BUILD_DIR/payload/darwin-$ARCH"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 
-# --- Code signing ---
+# --- Code signing (the app only; see build-app.sh) ---
 # signing.local.env (git-ignored) names your certificate; see signing.local.env.example.
-# Without it, builds are signed ad hoc ("-"), which only this Mac accepts.
+# Without it, builds are signed ad hoc ("-"), as CI and release builds are.
 if [ -f "$ROOT/signing.local.env" ]; then
   # shellcheck source=/dev/null
   source "$ROOT/signing.local.env"
 fi
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
-CODESIGN_TEAM_ID="${CODESIGN_TEAM_ID:-}"
