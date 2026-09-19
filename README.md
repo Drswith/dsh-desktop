@@ -1,6 +1,6 @@
 # DSH Launcher
 
-[![CI](https://github.com/Drswith/dsh-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Drswith/dsh-desktop/actions/workflows/ci.yml)
+[![CI](https://github.com/Drswith/dsh-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/Drswith/dsh-launcher/actions/workflows/ci.yml)
 
 DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳负责安装运行时、托管本地 `dsh web` 服务、看门狗和登录启动；DSH 界面仍是 dsh 自带的 Web UI，在默认浏览器中打开。
 
@@ -100,7 +100,7 @@ Apple Development 证书适合本机和开发调试；要让其他 Mac 双击打
 | `CFBundleVersion` | `BUILD_NUMBER`，未指定时取提交数 | `2` |
 | `DSHLauncherGitCommit` | 完整 commit，有未提交改动时加 `-dirty` | `fde1dc81…-dirty` |
 | `DSHLauncherBuildDate` | 构建时间（ISO 8601） | `2026-09-19T13:05:24+08:00` |
-| `DSHLauncherRepoURL` | `REPO_URL`，未指定时取 `origin`（转成 https，去掉账号信息）；“关于”中显示为 `GitHub: Drswith/dsh-desktop` | `https://github.com/Drswith/dsh-desktop` |
+| `DSHLauncherRepoURL` | `REPO_URL`，未指定时取 `origin`（转成 https，去掉账号信息）；“关于”中显示为 `GitHub: Drswith/dsh-launcher` | `https://github.com/Drswith/dsh-launcher` |
 
 除构建号外，这些字段都显示在“关于”窗口里；构建号只供系统比较新旧，和 commit 一起写进启动日志。构建号必须是 1～3 段数字（Apple 的要求）；`make dmg` 在构建号不是显式指定、或工作区有未提交改动时会给出提示。
 

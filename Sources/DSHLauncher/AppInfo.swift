@@ -22,10 +22,10 @@ struct AppInfo {
     var gitCommit: String? { string("DSHLauncherGitCommit").flatMap { $0 == "unknown" ? nil : $0 } }
     /// ISO 8601 build time with offset, e.g. `2026-09-19T10:05:10+08:00`.
     var buildDate: String? { string("DSHLauncherBuildDate") }
-    /// Source repository as an https URL, e.g. `https://github.com/Drswith/dsh-desktop`.
+    /// Source repository as an https URL, e.g. `https://github.com/Drswith/dsh-launcher`.
     var repoURL: String? { string("DSHLauncherRepoURL") }
 
-    /// About-dialog line for the repository: `GitHub: Drswith/dsh-desktop`, or
+    /// About-dialog line for the repository: `GitHub: Drswith/dsh-launcher`, or
     /// `Repo: host/path` for other hosts so a GitLab repo is never labeled GitHub.
     var repoEntry: (key: String, value: String)? {
         guard let repoURL else { return nil }

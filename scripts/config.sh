@@ -61,7 +61,7 @@ repo_url() {
     https://*) url="$(printf '%s' "$url" | sed -E 's#^https://[^/@]*@#https://#')" ;;
     *) url="" ;;
   esac
-  echo "${url:-https://github.com/Drswith/dsh-desktop}"
+  echo "${url:-https://github.com/Drswith/dsh-launcher}"
 }
 REPO_URL="${REPO_URL:-$(repo_url)}"
 # Build time as ISO 8601 with a colon offset (2026-09-19T10:05:10+08:00), like VS Code's Date.
