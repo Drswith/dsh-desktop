@@ -75,6 +75,18 @@ payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版�
 
 推送到 `main` 或提交 PR 时，[GitHub Actions](.github/workflows/ci.yml) 分别在 macOS 26 的 Apple Silicon（`macos-26`）与 Intel（`macos-26-intel`）运行器上检查脚本语法、运行测试、构建各自架构的 App 与 DMG，并把两个 DMG 作为构建产物保留 14 天。CI 没有证书，产物使用 ad-hoc 签名；构建号取 CI 的运行序号。Node.js、pnpm 下载与 pnpm store 按锁文件缓存。
 
+### 发布
+
+推送 `v*` tag 即发布，版本号以 tag 为准：
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+[发布工作流](.github/workflows/release.yml)依次：确认 tag 格式正确且位于 main 上；在 arm64 与 Intel 运行器上分别测试并构建；为每个架构生成 DMG（手动安装）与 ZIP（留给以后的自动更新）；计算 `SHA256SUMS.txt`；最后创建 GitHub Release。发布说明由 [安装说明模板](.github/release-notes.md) 加上按提交自动生成的更新内容组成。`v0.2.0-beta.1` 这类带后缀的 tag 发布为预发布版本；重跑工作流会覆盖同名附件。
+
+发布前可以先演练：在 Actions 页面手动运行 Release 工作流并填写版本号，它只构建并上传构建产物，不创建 Release。
+
 ### 签名
 
 签名身份放在不提交的 `signing.local.env`（格式见 `signing.local.env.example`），环境变量优先于该文件：
