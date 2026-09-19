@@ -19,7 +19,19 @@ log() {
 APP_NAME="${APP_NAME:-DSH Launcher}"
 EXECUTABLE_NAME="DSHLauncher"
 BUNDLE_ID="${BUNDLE_ID:-io.github.drswith.dsh-launcher}"
+# Version label: a release tag passes it explicitly (0.2.0, 0.2.0-beta.1); other
+# builds describe the nearest v* tag (0.2.0-3-gabc1234), or 0.1.0 before the first.
+tag_version() {
+  local described
+  described="$(git -C "$ROOT" describe --tags --match 'v[0-9]*' 2>/dev/null)" || described=""
+  echo "${described#v}"
+}
+APP_VERSION="${APP_VERSION:-$(tag_version)}"
 APP_VERSION="${APP_VERSION:-0.1.0}"
+[[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+  || die "APP_VERSION must look like 1.2.3 or 1.2.3-beta.1, got '$APP_VERSION'"
+# CFBundleShortVersionString allows three integers only; the label keeps any suffix.
+MARKETING_VERSION="${APP_VERSION%%-*}"
 URL_SCHEME="${URL_SCHEME:-dsh-launcher}"
 HOME_DIR_NAME="${HOME_DIR_NAME:-.dsh-launcher}"
 DSH_PROFILE="${DSH_PROFILE:-launcher}"

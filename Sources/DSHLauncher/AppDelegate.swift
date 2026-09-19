@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installSignalHandlers()
         log = FileLogger(url: paths.shellLog)
         let output = FileLogger(url: paths.daemonLog, echoToStderr: false)
-        log.log("\(info.displayName) \(info.version) (\(info.build)) commit=\(info.gitCommit ?? "unknown") launched pid=\(getpid()) loginItem=\(launchedAtLogin) bundle=\(Bundle.main.bundlePath)")
+        log.log("\(info.displayName) \(info.versionLabel) (\(info.build)) commit=\(info.gitCommit ?? "unknown") launched pid=\(getpid()) loginItem=\(launchedAtLogin) bundle=\(Bundle.main.bundlePath)")
         reloadConfig()
         installer = RuntimeInstaller(paths: paths, logger: log, payloadDirectory: info.payloadDirectory)
         supervisor = DaemonSupervisor(paths: paths, log: log, output: output)

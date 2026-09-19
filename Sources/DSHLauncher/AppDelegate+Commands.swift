@@ -147,7 +147,7 @@ extension AppDelegate: StatusMenuDelegate {
 
     func aboutDetails() -> [String] {
         // CFBundleVersion stays out: Commit and Date identify a build more precisely.
-        var lines = ["Version: \(info.version)"]
+        var lines = ["Version: \(info.versionLabel)"]
         if let repo = info.repoEntry { lines.append("\(repo.key): \(repo.value)") }
         if let commit = info.gitCommit { lines.append("Commit: \(commit)") }
         if let date = info.buildDate {

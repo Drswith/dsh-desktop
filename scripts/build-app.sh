@@ -35,6 +35,7 @@ sed \
   -e "s|@APP_NAME@|$APP_NAME|g" \
   -e "s|@EXECUTABLE_NAME@|$EXECUTABLE_NAME|g" \
   -e "s|@BUNDLE_ID@|$BUNDLE_ID|g" \
+  -e "s|@MARKETING_VERSION@|$MARKETING_VERSION|g" \
   -e "s|@APP_VERSION@|$APP_VERSION|g" \
   -e "s|@BUILD_NUMBER@|$BUILD_NUMBER|g" \
   -e "s|@URL_SCHEME@|$URL_SCHEME|g" \

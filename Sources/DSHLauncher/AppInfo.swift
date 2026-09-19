@@ -12,6 +12,8 @@ struct AppInfo {
 
     var displayName: String { string("CFBundleDisplayName") ?? string("CFBundleName") ?? "DSH Launcher" }
     var version: String { string("CFBundleShortVersionString") ?? "0.0.0" }
+    /// Full version with any pre-release suffix, e.g. `0.2.0-beta.1`.
+    var versionLabel: String { string("DSHLauncherVersionLabel") ?? version }
     var build: String { string("CFBundleVersion") ?? "0" }
     var bundleIdentifier: String { bundle.bundleIdentifier ?? "io.github.drswith.dsh-launcher" }
     var homeDirName: String { string("DSHLauncherHomeDirName") ?? ".dsh-launcher" }

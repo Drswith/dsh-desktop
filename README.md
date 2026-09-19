@@ -64,6 +64,7 @@ make lock DSH_VERSION=0.1.6-alpha.2 && make app DSH_VERSION=0.1.6-alpha.2
 
 ```bash
 make app ARCH=x86_64                      # Intel 包（Apple Silicon 上需 Rosetta）
+make app APP_VERSION=0.2.0-beta.1          # 显式版本号（默认取最近的 v* tag）
 make app BUILD_NUMBER=202609191  # 显式构建号（分享出去的包建议这样做）
 make app COPYRIGHT="© 2026 Drswith"        # 访达“显示简介”中的版权信息
 ```
@@ -96,13 +97,14 @@ Apple Development 证书适合本机和开发调试；要让其他 Mac 双击打
 
 | 字段 | 来源 | 示例 |
 |---|---|---|
-| `CFBundleShortVersionString` | `APP_VERSION` | `0.1.0` |
-| `CFBundleVersion` | `BUILD_NUMBER`，未指定时取提交数 | `2` |
+| `CFBundleShortVersionString` | 版本号的数字部分：发布时取自 tag，其余构建取最近的 `v*` tag，还没有 tag 时为 `0.1.0` | `0.2.0` |
+| `DSHLauncherVersionLabel` | 完整版本，保留预发布后缀，或距最近 tag 的提交数 | `0.2.0-beta.1`、`0.2.0-3-gabc1234` |
+| `CFBundleVersion` | `BUILD_NUMBER`：发布时为 tag 所在提交在 main 上的提交数，CI 为运行序号，本地默认提交数 | `9` |
 | `DSHLauncherGitCommit` | 完整 commit，有未提交改动时加 `-dirty` | `fde1dc81…-dirty` |
 | `DSHLauncherBuildDate` | 构建时间（ISO 8601） | `2026-09-19T13:05:24+08:00` |
 | `DSHLauncherRepoURL` | `REPO_URL`，未指定时取 `origin`（转成 https，去掉账号信息）；“关于”中显示为 `GitHub: Drswith/dsh-launcher` | `https://github.com/Drswith/dsh-launcher` |
 
-除构建号外，这些字段都显示在“关于”窗口里；构建号只供系统比较新旧，和 commit 一起写进启动日志。构建号必须是 1～3 段数字（Apple 的要求）；`make dmg` 在构建号不是显式指定、或工作区有未提交改动时会给出提示。
+除构建号外，这些字段都显示在“关于”窗口里（Version 显示完整版本）；构建号只供系统比较新旧，和 commit 一起写进启动日志。构建号必须是 1～3 段数字（Apple 的要求）；`make dmg` 在构建号不是显式指定、或工作区有未提交改动时会给出提示。
 
 ## 目录布局
 
