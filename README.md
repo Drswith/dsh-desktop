@@ -63,19 +63,17 @@ make lock DSH_VERSION=0.1.6-alpha.2 && make app DSH_VERSION=0.1.6-alpha.2
 其他可覆盖的设置：
 
 ```bash
-make app ARCH=x86_64                      # Intel 包（Apple Silicon 上需 Rosetta）
+make app ARCH=x86_64                       # Intel 包（Apple Silicon 上需 Rosetta）
 make app APP_VERSION=0.2.0-beta.1          # 显式版本号（默认取最近的 v* tag）
-make app BUILD_NUMBER=202609191  # 显式构建号（分享出去的包建议这样做）
+make app BUILD_NUMBER=42                   # 显式构建号（默认取提交数）
 make app COPYRIGHT="© 2026 Drswith"        # 访达“显示简介”中的版权信息
 ```
 
 payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查。pnpm 在可选依赖下载失败时只会跳过、不报错，所以安装后会对照锁文件确认当前架构的平台专属包全部到位，缺任何一个都会让构建失败。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。payload 只在锁文件或版本变化时重建（`FORCE=1` 强制重建）。
 
-### CI
+### CI 与发布
 
-推送到 `main` 或提交 PR 时，[GitHub Actions](.github/workflows/ci.yml) 分别在 macOS 26 的 Apple Silicon（`macos-26`）与 Intel（`macos-26-intel`）运行器上检查脚本语法、运行测试、构建各自架构的 App 与 DMG，并把两个 DMG 作为构建产物保留 14 天。CI 没有证书，产物使用 ad-hoc 签名；构建号取 CI 的运行序号。Node.js、pnpm 下载与 pnpm store 按锁文件缓存。
-
-### 发布
+[CI](.github/workflows/ci.yml) 在 macOS 26 的 Apple Silicon（`macos-26`）与 Intel（`macos-26-intel`）运行器上分别运行测试，并构建各自架构的 App 和 DMG。CI 没有证书，产物使用 ad hoc 签名；Node.js、pnpm 下载与 pnpm store 按锁文件缓存。推送到 `main` 和提交 PR 时只做这些；想试用还没发布的版本，就在 Actions 页面手动运行 CI，两个 DMG 会作为构建产物保留 7 天。
 
 推送 `v*` tag 即发布，版本号以 tag 为准：
 
@@ -83,9 +81,7 @@ payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版�
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-[发布工作流](.github/workflows/release.yml)依次：确认 tag 格式正确且位于 main 上；在 arm64 与 Intel 运行器上分别测试并构建；为每个架构生成 DMG（手动安装）与 ZIP（留给以后的自动更新）；计算 `SHA256SUMS.txt`；最后创建 GitHub Release。发布说明由 [安装说明模板](.github/release-notes.md) 加上按提交自动生成的更新内容组成。`v0.2.0-beta.1` 这类带后缀的 tag 发布为预发布版本；重跑工作流会覆盖同名附件。
-
-发布前可以先演练：在 Actions 页面手动运行 Release 工作流并填写版本号，它只构建并上传构建产物，不创建 Release。
+两个架构都构建成功后，CI 生成 `SHA256SUMS.txt` 并创建 GitHub Release，发布说明由[安装说明模板](.github/release-notes.md)加上按提交自动生成的更新内容组成。`v0.2.0-beta.1` 这类带后缀的 tag 发布为预发布版本。发布失败要重跑时，先删掉已创建的 Release（保留 tag）。dsh 随 App 一起发版，不单独热更新运行时。
 
 ### 签名
 
@@ -113,12 +109,12 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCD
 |---|---|---|
 | `CFBundleShortVersionString` | 版本号的数字部分：发布时取自 tag，其余构建取最近的 `v*` tag，还没有 tag 时为 `0.1.0` | `0.2.0` |
 | `DSHLauncherVersionLabel` | 完整版本，保留预发布后缀，或距最近 tag 的提交数 | `0.2.0-beta.1`、`0.2.0-3-gabc1234` |
-| `CFBundleVersion` | `BUILD_NUMBER`：发布时为 tag 所在提交在 main 上的提交数，CI 为运行序号，本地默认提交数 | `9` |
+| `CFBundleVersion` | `BUILD_NUMBER`，默认为提交数（`git rev-list --count HEAD`） | `9` |
 | `DSHLauncherGitCommit` | 完整 commit，有未提交改动时加 `-dirty` | `fde1dc81…-dirty` |
 | `DSHLauncherBuildDate` | 构建时间（ISO 8601） | `2026-09-19T13:05:24+08:00` |
 | `DSHLauncherRepoURL` | `REPO_URL`，未指定时取 `origin`（转成 https，去掉账号信息）；“关于”中显示为 `GitHub: Drswith/dsh-launcher` | `https://github.com/Drswith/dsh-launcher` |
 
-除构建号外，这些字段都显示在“关于”窗口里（Version 显示完整版本）；构建号只供系统比较新旧，和 commit 一起写进启动日志。构建号必须是 1～3 段数字（Apple 的要求）；`make dmg` 在构建号不是显式指定、或工作区有未提交改动时会给出提示。
+除构建号外，这些字段都显示在“关于”窗口里（Version 显示完整版本）；构建号只供系统比较新旧，和 commit 一起写进启动日志。构建号必须是 1～3 段数字（Apple 的要求）；工作区有未提交改动时，`make dmg` 会给出提示。
 
 ## 目录布局
 
@@ -181,7 +177,6 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCD
 
 ## 后续工作
 
-- **发版**：打 tag 时由 CI 构建并上传到 GitHub Releases。dsh 版本随 App 一起发布，不单独热更新运行时。
 - **对外分发**：需要 Developer ID Application 证书（付费开发者计划）并完成公证（`notarytool` 提交、`stapler` 装订）。
 - **自更新**：App 可接入 Sparkle；新版本自带的运行时会在启动时自动替换。
 - **可选窗口模式**：用 WKWebView 承载同一 URL，作为浏览器之外的选项。

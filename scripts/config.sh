@@ -40,15 +40,9 @@ DEFAULT_PORT="${DEFAULT_PORT:-31080}"
 COPYRIGHT="${COPYRIGHT:-© 2026 Drswith}"
 
 # --- Build identity ---
-# CFBundleVersion must be 1-3 dot-separated integers that only ever increase.
-# Local builds default to the commit count; release builds pass BUILD_NUMBER
-# explicitly (CI run number or timestamp), which build-app.sh enforces.
-if [ -n "${BUILD_NUMBER:-}" ]; then
-  BUILD_NUMBER_SOURCE=explicit
-else
-  BUILD_NUMBER_SOURCE=commit-count
-  BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
-fi
+# CFBundleVersion must be 1-3 dot-separated integers that only ever increase;
+# the default is the commit count (CI checks out the full history for it).
+BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
 [[ "$BUILD_NUMBER" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] \
   || die "BUILD_NUMBER must be 1-3 dot-separated integers (CFBundleVersion), got '$BUILD_NUMBER'"
 

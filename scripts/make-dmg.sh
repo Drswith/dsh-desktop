@@ -12,9 +12,6 @@ ln -s /Applications "$STAGE/Applications"
 log "creating $(basename "$DMG")"
 hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
-# A shared image should be traceable to one clean commit and an explicit build number.
-if [ "$BUILD_NUMBER_SOURCE" != explicit ]; then
-  log "warning: build number $BUILD_NUMBER is the local commit count; pass BUILD_NUMBER for images you share"
-fi
+# A shared image should be traceable to one clean commit.
 case "$GIT_COMMIT" in *-dirty|unknown) log "warning: built from $GIT_COMMIT, not a clean commit" ;; esac
 log "disk image ready: $DMG ($(du -h "$DMG" | awk '{ print $1 }'))"

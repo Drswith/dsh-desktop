@@ -13,4 +13,4 @@
 xattr -dr com.apple.quarantine "/Applications/DSH Launcher.app"
 ```
 
-内置运行时：DSH {{DSH_VERSION}} · Node.js {{NODE_VERSION}} · pnpm {{PNPM_VERSION}}。`.zip` 是同一个 App 的压缩包，留给以后的自动更新使用；`SHA256SUMS.txt` 可用于校验下载的文件。
+内置 DSH {{DSH_VERSION}}。`SHA256SUMS.txt` 可用于校验下载的文件。

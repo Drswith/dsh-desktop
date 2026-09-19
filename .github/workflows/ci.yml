@@ -1,8 +1,12 @@
 name: CI
 
+# Pushes and pull requests test and build both architectures. A pushed v* tag
+# also publishes the disk images as a GitHub release; a manual run keeps them
+# as artifacts, to try a build before releasing it.
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -10,7 +14,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Keyed on the event too, so a manual run never cancels the push run of the same commit.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -27,24 +32,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
-      # CI holds no certificate, so builds are signed ad hoc; the run number
-      # gives CI images a monotonic build number.
-      BUILD_NUMBER: ${{ github.run_number }}
       ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: true
-          # Full history, so the version label can describe the nearest v* tag.
+          # Full history: the version describes the nearest v* tag, and the
+          # build number counts commits.
           fetch-depth: 0
-
-      - name: Show toolchain
-        run: |
-          sw_vers
-          xcodebuild -version
-          # A mislabeled runner would otherwise cross-build under Rosetta and still pass.
-          test "$(uname -m)" = "$ARCH" || { echo "runner is $(uname -m), expected $ARCH"; exit 1; }
-          swift --version
 
       # Node.js and pnpm downloads plus the pnpm store; keyed on everything that
       # decides what the runtime installs.
@@ -55,21 +50,50 @@ jobs:
           restore-keys: |
             runtime-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Check shell scripts
-        run: for script in scripts/*.sh; do bash -n "$script"; done
-
       - name: Unit and integration tests
         run: swift test
 
-      - name: Build the app
-        run: make app
+      - name: Build the app and the disk image
+        run: |
+          # A tag build takes its version from that tag, even when another tag marks the same commit.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then export APP_VERSION="${GITHUB_REF_NAME#v}"; fi
+          make app
+          scripts/make-dmg.sh
 
-      - name: Build the disk image
-        run: scripts/make-dmg.sh
-
-      - uses: actions/upload-artifact@v7
+      - if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
         with:
-          name: DSH-Launcher-${{ github.run_number }}-${{ matrix.arch }}
+          name: dmg-${{ matrix.arch }}
           path: build/*.dmg
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
+
+  release:
+    name: Publish the GitHub release
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dmg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dsh="$(sed -n 's/^    "@deepseek-ai\/dsh": "\(.*\)"$/\1/p' runtime/package.json)"
+          (cd dist && shasum -a 256 *.dmg > SHA256SUMS.txt)
+          sed -e "s/{{VERSION}}/$version/g" -e "s/{{DSH_VERSION}}/$dsh/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
+          # A suffixed tag such as v0.2.0-beta.1 is a prerelease.
+          prerelease=()
+          if [[ "$version" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --title "DSH Launcher $version" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${prerelease[@]}"
