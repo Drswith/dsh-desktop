@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and build (macOS arm64)
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      # CI holds no certificate, so builds are signed ad hoc; the run number
+      # gives CI images a monotonic build number.
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      # Node.js and pnpm downloads plus the pnpm store; keyed on everything that
+      # decides what the runtime installs.
+      - uses: actions/cache@v6
+        with:
+          path: .cache
+          key: runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime/pnpm-lock.yaml', 'deepseek-harness/package.json', 'deepseek-harness/apps/desktop/scripts/prepare-runtime.ts') }}
+          restore-keys: |
+            runtime-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Check shell scripts
+        run: for script in scripts/*.sh; do bash -n "$script"; done
+
+      - name: Unit and integration tests
+        run: swift test
+
+      - name: Build the app
+        run: make app
+
+      - name: Build the disk image
+        run: scripts/make-dmg.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: DSH-Launcher-${{ github.run_number }}-arm64
+          path: build/*.dmg
+          if-no-files-found: error
+          retention-days: 14

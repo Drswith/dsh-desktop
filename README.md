@@ -1,5 +1,7 @@
 # DSH Launcher
 
+[![CI](https://github.com/Drswith/dsh-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Drswith/dsh-desktop/actions/workflows/ci.yml)
+
 DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳负责安装运行时、托管本地 `dsh web` 服务、看门狗和登录启动；DSH 界面仍是 dsh 自带的 Web UI，在默认浏览器中打开。
 
 > 基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`deepseek-harness/` 子模块）构建，非 DeepSeek 官方产品。
@@ -67,6 +69,10 @@ make app COPYRIGHT="© 2026 Drswith"        # 访达“显示简介”中的版�
 ```
 
 payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查，约需 1～2 分钟。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。payload 只在锁文件、版本或签名身份变化时重建（`FORCE=1` 强制重建）。
+
+### CI
+
+推送到 `main` 或提交 PR 时，[GitHub Actions](.github/workflows/ci.yml) 在 macOS 26（Apple Silicon）上检查脚本语法、运行测试、构建 App 与 DMG，并把 DMG 作为构建产物保留 14 天。CI 没有证书，产物使用 ad-hoc 签名；构建号取 CI 的运行序号。Node.js、pnpm 下载与 pnpm store 按锁文件缓存。
 
 ### 签名
 
