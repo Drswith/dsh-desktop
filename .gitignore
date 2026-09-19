@@ -60,3 +60,10 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# DSH Launcher build outputs and download caches
+/build/
+/.cache/
+*.dmg
+.DS_Store
+/signing.local.env
