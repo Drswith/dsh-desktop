@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the runtime payload the app extracts on first launch:
-#   runtime.tar.gz = node/ (official Node.js) + pnpm/ + app/ (the committed runtime
+#   runtime.aar = node/ (official Node.js) + pnpm/ + app/ (the committed runtime
 #   project installed from its lockfile) + bin/ (dsh and pnpm shims), plus manifest.json.
 # The install mirrors the official desktop seed: the pinned pnpm runs under the
 # bundled Node with an isolated store and config, a hoisted node_modules, and only
@@ -13,7 +13,9 @@ MANIFEST="$PAYLOAD_DIR/manifest.json"
 PROJECT_FILES=("$RUNTIME_PROJECT/package.json" "$RUNTIME_PROJECT/pnpm-workspace.yaml" "$RUNTIME_PROJECT/pnpm-lock.yaml")
 for file in "${PROJECT_FILES[@]}"; do [ -f "$file" ] || die "missing $file; run: make lock"; done
 PROJECT_HASH="$(cat "${PROJECT_FILES[@]}" | shasum -a 256 | cut -c1-16)"
-IDENTITY="dsh=$LOCKED_DSH_VERSION lock=$PROJECT_HASH node=$NODE_VERSION pnpm=$PNPM_VERSION arch=$ARCH"
+# The scripts that shape the payload are inputs too, so changing them rebuilds it.
+SCRIPTS_HASH="$(cat "$0" "$(dirname "$0")/toolchain.sh" | shasum -a 256 | cut -c1-16)"
+IDENTITY="dsh=$LOCKED_DSH_VERSION lock=$PROJECT_HASH node=$NODE_VERSION pnpm=$PNPM_VERSION arch=$ARCH scripts=$SCRIPTS_HASH"
 
 if [ "${FORCE:-0}" != 1 ] && [ -f "$MANIFEST" ] && [ -f "$PAYLOAD_DIR/build-identity" ] \
   && [ "$(cat "$PAYLOAD_DIR/build-identity")" = "$IDENTITY" ]; then
@@ -70,13 +72,18 @@ if [ "${SKIP_SMOKE:-0}" != 1 ]; then
   "$(dirname "$0")/smoke-runtime.sh" "$RUNTIME"
 fi
 
-# 7. Archive + manifest.
+# 7. Archive + manifest. Apple Archive's LZMA (the system `aa`) packs about 40%
+#    smaller than gzip and extracts faster, using every core. Only the four trees
+#    are archived, without the build machine's owners, flags, extended attributes
+#    or ACLs.
 mkdir -p "$PAYLOAD_DIR"
-rm -f "$PAYLOAD_DIR"/runtime.tar.gz* "$MANIFEST" "$PAYLOAD_DIR/build-identity" "$PAYLOAD_DIR/pnpm-lock.yaml"
+rm -f "$PAYLOAD_DIR"/runtime.* "$MANIFEST" "$PAYLOAD_DIR/build-identity" "$PAYLOAD_DIR/pnpm-lock.yaml"
 log "archiving runtime ($(du -sh "$RUNTIME" | awk '{ print $1 }') unpacked)"
-COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$RUNTIME" -czf "$PAYLOAD_DIR/runtime.tar.gz.part" bin node pnpm app
-mv "$PAYLOAD_DIR/runtime.tar.gz.part" "$PAYLOAD_DIR/runtime.tar.gz"
-sha="$(shasum -a 256 "$PAYLOAD_DIR/runtime.tar.gz" | awk '{ print $1 }')"
+aa archive -d "$RUNTIME" -o "$PAYLOAD_DIR/runtime.aar.part" -a lzma -b 64m \
+  -exclude-field uid,gid,flg,xat,acl,btm,ctm \
+  -include-path bin -include-path node -include-path pnpm -include-path app
+mv "$PAYLOAD_DIR/runtime.aar.part" "$PAYLOAD_DIR/runtime.aar"
+sha="$(shasum -a 256 "$PAYLOAD_DIR/runtime.aar" | awk '{ print $1 }')"
 cat > "$MANIFEST" <<EOF
 {
   "schemaVersion": 1,
@@ -85,11 +92,11 @@ cat > "$MANIFEST" <<EOF
   "pnpmVersion": "$PNPM_VERSION",
   "platform": "darwin",
   "arch": "$ARCH",
-  "archive": "runtime.tar.gz",
+  "archive": "runtime.aar",
   "archiveSHA256": "$sha",
   "createdAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 echo "$IDENTITY" > "$PAYLOAD_DIR/build-identity"
 rm -rf "$WORK"
-log "payload ready: $PAYLOAD_DIR ($(du -h "$PAYLOAD_DIR/runtime.tar.gz" | awk '{ print $1 }'), sha256 ${sha:0:12}…)"
+log "payload ready: $PAYLOAD_DIR ($(du -h "$PAYLOAD_DIR/runtime.aar" | awk '{ print $1 }'), sha256 ${sha:0:12}…)"

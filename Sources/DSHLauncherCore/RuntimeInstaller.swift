@@ -86,7 +86,7 @@ public final class RuntimeInstaller: @unchecked Sendable {
         defer { try? fm.removeItem(at: staging) }
 
         let started = Date()
-        try CommandRunner.check("/usr/bin/tar", ["-xzf", archive.path, "-C", staging.path], timeout: 600)
+        try CommandRunner.check("/usr/bin/aa", ["extract", "-d", staging.path, "-i", archive.path], timeout: 600)
         // The payload is sealed by the app signature and verified above; downloaded
         // app bundles must not leak quarantine onto extracted native modules.
         _ = try? CommandRunner.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", staging.path], timeout: 120)

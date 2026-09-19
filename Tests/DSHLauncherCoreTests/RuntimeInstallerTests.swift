@@ -29,8 +29,9 @@ final class RuntimeInstallerTests: XCTestCase {
 
         let payload = root.appendingPathComponent(name)
         try fm.createDirectory(at: payload, withIntermediateDirectories: true)
-        let archive = payload.appendingPathComponent("runtime.tar.gz")
-        try CommandRunner.check("/usr/bin/tar", ["-czf", archive.path, "-C", tree.path, "node", "app"])
+        let archive = payload.appendingPathComponent("runtime.aar")
+        try CommandRunner.check("/usr/bin/aa", ["archive", "-d", tree.path, "-o", archive.path, "-a", "lzma",
+                                                "-include-path", "node", "-include-path", "app"])
         let manifest = RuntimeManifest(dshVersion: dshVersion, nodeVersion: "24.17.0", pnpmVersion: "11.7.0",
                                        arch: "arm64", archiveSHA256: try RuntimeInstaller.sha256(of: archive))
         try JSONEncoder().encode(manifest).write(to: payload.appendingPathComponent("manifest.json"))

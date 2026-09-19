@@ -15,14 +15,14 @@ DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳�
 | 外壳 | Swift/AppKit 菜单栏，约 0.7 MB | Electron |
 | 服务 | `dsh --profile launcher --no-open`，`127.0.0.1:31080` | 无端口，`dsh-app://` 协议 + 字节管道 |
 | UI | 默认浏览器 | Electron 窗口 |
-| 运行时 | App 内 `runtime.tar.gz` → `~/.dsh-launcher/runtime` | App 内 seed → `$DSH_HOME/profiles/desktop` |
+| 运行时 | App 内 `runtime.aar` → `~/.dsh-launcher/runtime` | App 内 seed → `$DSH_HOME/profiles/desktop` |
 | 登录启动 | `SMAppService.mainApp` | — |
 | 深链接 | `dsh-launcher://` | — |
-| 体积 | App 约 90 MB，运行时解压后约 390 MB | 约 770 MB |
+| 体积 | App 约 52 MB，运行时解压后约 390 MB | 约 770 MB |
 
 ## 运行流程
 
-1. **安装运行时**：校验 `payload/manifest.json` 中的 SHA-256，把 `runtime.tar.gz`（官方 Node.js + pnpm + pnpm 安装的 `@deepseek-ai/dsh`）解压到 staging，验证 Node 与 dsh 版本后原子切换 `runtime/current` 软链，保留上一版本用于回滚。已安装的运行时比内置的更新时，保留已安装的版本。
+1. **安装运行时**：校验 `payload/manifest.json` 中的 SHA-256，用系统自带的 `aa` 把 `runtime.aar`（官方 Node.js + pnpm + pnpm 安装的 `@deepseek-ai/dsh`）解压到 staging，验证 Node 与 dsh 版本后原子切换 `runtime/current` 软链，保留上一版本用于回滚。已安装的运行时比内置的更新时，保留已安装的版本。
 2. **解析环境**：以 `$SHELL -l -i -c 'env -0'` 取得登录 shell 环境（GUI 应用默认只有 launchd 的精简 PATH），dsh 执行 git、包管理器等工具时与终端一致。
 3. **启动服务**：`posix_spawn` 启动 `node …/dsh/lib/bin.js --profile launcher [--from-default-profile web] --no-open --host 127.0.0.1 --port 31080`，进程独占一个进程组；端口被占用时顺延。
 4. **就绪**：stdout 出现 `dsh web: http://127.0.0.1:<port>/?token=…` 即就绪。token 只保存在内存中，写日志前一律脱敏；手动启动时用它打开默认浏览器，dsh 换发 30 天 cookie 后跳回干净的根路径。
@@ -69,7 +69,7 @@ make app BUILD_NUMBER=42                   # 显式构建号（默认取提交�
 make app COPYRIGHT="© 2026 Drswith"        # 访达“显示简介”中的版权信息
 ```
 
-payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查。pnpm 在可选依赖下载失败时只会跳过、不报错，所以安装后会对照锁文件确认当前架构的平台专属包全部到位，缺任何一个都会让构建失败。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。payload 只在锁文件或版本变化时重建（`FORCE=1` 强制重建）。
+payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查。pnpm 在可选依赖下载失败时只会跳过、不报错，所以安装后会对照锁文件确认当前架构的平台专属包全部到位，缺任何一个都会让构建失败。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。运行时用 Apple Archive 的 LZMA 压缩成 `runtime.aar`（系统自带的 `aa`，比 gzip 小约 40%，压缩和解压都用满全部核心），不带构建机的属主、扩展属性和 ACL。payload 只在锁文件、版本或打包脚本变化时重建（`FORCE=1` 强制重建）。
 
 ### CI 与发布
 
@@ -85,9 +85,9 @@ git tag v0.2.0 && git push origin v0.2.0
 
 ### 签名
 
-只签外层 `DSH Launcher.app`：签 Swift 可执行文件，并把包里其余文件（包括 `payload/runtime.tar.gz`）的哈希封存进签名。运行时里的 Node 和原生模块不重新签名：
+只签外层 `DSH Launcher.app`：签 Swift 可执行文件，并把包里其余文件（包括 `payload/runtime.aar`）的哈希封存进签名。运行时里的 Node 和原生模块不重新签名：
 
-- 它们在 `runtime.tar.gz` 里，对 App 的签名来说只是被封存的数据文件。
+- 它们在 `runtime.aar` 里，对 App 的签名来说只是被封存的数据文件。
 - 解压后 Node 仍是 Node.js 官方的 Developer ID 签名，自带 JIT 和 `disable-library-validation` 权限；原生模块在 arm64 上带链接器生成的 ad hoc 签名，x86_64 上不要求签名。
 - 解压时会清除 quarantine 标记，Gatekeeper 不会检查这些文件。
 

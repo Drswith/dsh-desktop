@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compile the Swift shell and assemble build/<APP_NAME>.app:
 #   Contents/MacOS/DSHLauncher           native menu bar launcher
-#   Contents/Resources/payload/          runtime.tar.gz + manifest.json (from prepare-payload.sh)
+#   Contents/Resources/payload/          runtime.aar + manifest.json (from prepare-payload.sh)
 #   Contents/Resources/*.lproj, icons    UI resources
 source "$(dirname "$0")/config.sh"
 
@@ -68,11 +68,11 @@ cp -R "$ROOT/Resources/en.lproj" "$ROOT/Resources/zh-Hans.lproj" "$CONTENTS/Reso
 
 if [ -f "$MANIFEST" ]; then
   mkdir -p "$CONTENTS/Resources/payload"
-  cp -c "$MANIFEST" "$PAYLOAD_DIR/runtime.tar.gz" "$CONTENTS/Resources/payload/" 2>/dev/null \
-    || cp "$MANIFEST" "$PAYLOAD_DIR/runtime.tar.gz" "$CONTENTS/Resources/payload/"
+  cp -c "$MANIFEST" "$PAYLOAD_DIR/runtime.aar" "$CONTENTS/Resources/payload/" 2>/dev/null \
+    || cp "$MANIFEST" "$PAYLOAD_DIR/runtime.aar" "$CONTENTS/Resources/payload/"
 fi
 
-# Only the app is signed. runtime.tar.gz is sealed data to this signature, and the
+# Only the app is signed. runtime.aar is sealed data to this signature, and the
 # code inside keeps the signatures it ships with: Node.js's own Developer ID, and
 # the linker's ad hoc signature on arm64 native modules.
 if [ "$CODESIGN_IDENTITY" = - ]; then signer="ad hoc"; else signer="$CODESIGN_IDENTITY"; fi

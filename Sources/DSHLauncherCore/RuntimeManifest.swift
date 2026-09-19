@@ -8,13 +8,13 @@ public struct RuntimeManifest: Codable, Equatable, Sendable {
     public var pnpmVersion: String
     public var platform: String
     public var arch: String
-    /// Archive file name relative to the manifest (`runtime.tar.gz`).
+    /// Apple Archive file name relative to the manifest (`runtime.aar`).
     public var archive: String
     public var archiveSHA256: String
     public var createdAt: String?
 
     public init(schemaVersion: Int = 1, dshVersion: String, nodeVersion: String, pnpmVersion: String,
-                platform: String = "darwin", arch: String, archive: String = "runtime.tar.gz",
+                platform: String = "darwin", arch: String, archive: String = "runtime.aar",
                 archiveSHA256: String, createdAt: String? = nil) {
         self.schemaVersion = schemaVersion
         self.dshVersion = dshVersion
