@@ -7,7 +7,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     enum Keys {
         static let configuredLaunchAtLogin = "didConfigureLaunchAtLogin"
         static let skipQuitConfirmation = "skipQuitConfirmation"
+        static let keepPreviousRuntime = "keepPreviousRuntime"
     }
+
+    /// Keep the runtime an upgrade replaces (on by default: dsh previews change quickly).
+    var keepsPreviousRuntime: Bool { defaults.object(forKey: Keys.keepPreviousRuntime) as? Bool ?? true }
 
     enum RunAction {
         case start
@@ -66,12 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         log.log("\(info.displayName) \(info.versionLabel) (\(info.build)) commit=\(info.gitCommit ?? "unknown") launched pid=\(getpid()) loginItem=\(launchedAtLogin) bundle=\(Bundle.main.bundlePath)")
         reloadConfig()
         installer = RuntimeInstaller(paths: paths, logger: log, payloadDirectory: info.payloadDirectory)
+        installer.keepsPreviousRuntime = keepsPreviousRuntime
         supervisor = DaemonSupervisor(paths: paths, log: log, output: output)
         supervisor.onStateChange = { [weak self] state in self?.daemonStateChanged(state) }
 
         NSApp.mainMenu = makeMainMenu()
         var model = MenuModel(appName: info.displayName)
         model.canRepair = installer.bundledManifest() != nil
+        model.keepsPreviousRuntime = keepsPreviousRuntime
         model.showsDockIcon = NSApp.activationPolicy() == .regular
         model.launchAtLogin = LaunchAtLogin.status
         menu = StatusMenuController(model: model)

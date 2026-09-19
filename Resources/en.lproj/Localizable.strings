@@ -21,6 +21,7 @@
 "menu.openLoginItemsSettings" = "Open Login Items Settings…";
 "menu.showDock" = "Show Dock Icon";
 "menu.hideDock" = "Hide Dock Icon";
+"menu.keepPreviousRuntime" = "Keep Previous Runtime After Upgrades";
 "menu.openLogs" = "Show Logs in Finder";
 "menu.openDshHome" = "Open DSH Data Folder";
 "menu.editConfig" = "Edit Configuration…";

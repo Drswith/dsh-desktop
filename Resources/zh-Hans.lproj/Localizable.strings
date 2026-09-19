@@ -21,6 +21,7 @@
 "menu.openLoginItemsSettings" = "打开登录项设置…";
 "menu.showDock" = "显示 Dock 图标";
 "menu.hideDock" = "隐藏 Dock 图标";
+"menu.keepPreviousRuntime" = "升级后保留上一个运行时";
 "menu.openLogs" = "在访达中显示日志";
 "menu.openDshHome" = "打开 DSH 数据目录";
 "menu.editConfig" = "编辑配置…";

@@ -22,7 +22,7 @@ DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳�
 
 ## 运行流程
 
-1. **安装运行时**：校验 `payload/manifest.json` 中的 SHA-256，用系统自带的 `aa` 把 `runtime.aar`（官方 Node.js + pnpm + pnpm 安装的 `@deepseek-ai/dsh`）解压到 staging，验证 Node 与 dsh 版本后原子切换 `runtime/current` 软链，保留上一版本用于回滚。已安装的运行时比内置的更新时，保留已安装的版本。
+1. **安装运行时**：校验 `payload/manifest.json` 中的 SHA-256，用系统自带的 `aa` 把 `runtime.aar`（官方 Node.js + pnpm + pnpm 安装的 `@deepseek-ai/dsh`）解压到 staging，验证 Node 与 dsh 版本后原子切换 `runtime/current` 软链。被替换的运行时记为 `runtime/previous`，最多保留一个，再次升级时清理更早的版本；菜单“升级后保留上一个运行时”关闭后只留当前版本，并立即清理已保留的那个。已安装的运行时比内置的更新时，保留已安装的版本。
 2. **解析环境**：以 `$SHELL -l -i -c 'env -0'` 取得登录 shell 环境（GUI 应用默认只有 launchd 的精简 PATH），dsh 执行 git、包管理器等工具时与终端一致。
 3. **启动服务**：`posix_spawn` 启动 `node …/dsh/lib/bin.js --profile launcher [--from-default-profile web] --no-open --host 127.0.0.1 --port 31080`，进程独占一个进程组；端口被占用时顺延。
 4. **就绪**：stdout 出现 `dsh web: http://127.0.0.1:<port>/?token=…` 即就绪。token 只保存在内存中，写日志前一律脱敏；手动启动时用它打开默认浏览器，dsh 换发 30 天 cookie 后跳回干净的根路径。
@@ -121,6 +121,7 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCD
 ```
 ~/.dsh-launcher/
 ├── runtime/current -> dsh-<ver>-node-<ver>-<arch>-<sha8>/
+├── runtime/previous -> …        # 上次升级前的运行时，关闭“升级后保留上一个运行时”则没有
 │   ├── node/  pnpm/  app/node_modules/@deepseek-ai/dsh
 │   └── bin/dsh, bin/pnpm        # 终端可用的 shim，例如 dsh plugin --profile launcher add <pkg>
 ├── logs/launcher.log            # 外壳日志
@@ -154,7 +155,7 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCD
 
 ## 菜单与深链接
 
-菜单：状态与运行时版本、打开 DSH（⌘O）、复制访问链接、重启/停止/启动服务、登录时启动（含“需要批准”状态）、隐藏 / 显示 Dock 图标、在访达中显示日志、打开 DSH 数据目录、编辑配置、重新安装内置运行时、关于、退出。
+菜单：状态与运行时版本、打开 DSH（⌘O）、复制访问链接、重启/停止/启动服务、登录时启动（含“需要批准”状态）、隐藏 / 显示 Dock 图标、升级后保留上一个运行时（默认开启）、在访达中显示日志、打开 DSH 数据目录、编辑配置、重新安装内置运行时、关于、退出。
 
 “关于”窗口参照 VS Code 的格式：应用图标和名称下逐行列出 Version、GitHub（仓库不在 GitHub 时为 Repo）、Commit、Date（附相对时间）、DSH / Node.js / pnpm 版本和 OS；“复制”按钮把这些信息放进剪贴板，方便反馈问题。状态栏菜单和 Dock 模式下的应用菜单共用这个窗口。
 

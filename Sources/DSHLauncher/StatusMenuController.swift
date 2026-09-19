@@ -3,7 +3,7 @@ import DSHLauncherCore
 
 enum MenuCommand: String {
     case open, copyURL, restart, stop, start
-    case toggleLaunchAtLogin, openLoginItems, toggleDock
+    case toggleLaunchAtLogin, openLoginItems, toggleDock, toggleKeepPreviousRuntime
     case openLogs, openDshHome, editConfig, repair, about, quit
 }
 
@@ -19,6 +19,7 @@ struct MenuModel {
     var launchAtLogin: LaunchAtLoginStatus = .disabled
     var showsDockIcon = false
     var canRepair = false
+    var keepsPreviousRuntime = true
 }
 
 /// The status item and its menu, rebuilt from `MenuModel` whenever it opens or changes.
@@ -102,6 +103,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             menu.addItem(action(L10n.tr("menu.openLoginItemsSettings"), .openLoginItems))
         }
         menu.addItem(action(L10n.tr(model.showsDockIcon ? "menu.hideDock" : "menu.showDock"), .toggleDock))
+        if model.canRepair {
+            let keep = action(L10n.tr("menu.keepPreviousRuntime"), .toggleKeepPreviousRuntime)
+            keep.state = model.keepsPreviousRuntime ? .on : .off
+            menu.addItem(keep)
+        }
         menu.addItem(.separator())
 
         menu.addItem(action(L10n.tr("menu.openLogs"), .openLogs))

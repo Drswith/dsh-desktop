@@ -21,11 +21,14 @@ public struct InstalledRuntime: Equatable, Sendable {
 }
 
 /// Installs the bundled payload into `~/.dsh-launcher/runtime/<id>` and flips the
-/// `current` symlink atomically, keeping the previous runtime for rollback.
+/// `current` symlink atomically. The runtime an upgrade replaces stays behind as
+/// `previous`, at most one, unless `keepsPreviousRuntime` is off.
 public final class RuntimeInstaller: @unchecked Sendable {
     private let paths: AppPaths
     private let logger: FileLogger
     private let payloadDirectory: URL?
+    /// Keep the runtime an upgrade replaces as `previous`; off keeps `current` alone.
+    public var keepsPreviousRuntime = true
 
     public init(paths: AppPaths, logger: FileLogger, payloadDirectory: URL?) {
         self.paths = paths
@@ -42,8 +45,12 @@ public final class RuntimeInstaller: @unchecked Sendable {
 
     /// The runtime `current` points at, when its receipt and entry points exist.
     public func currentRuntime() -> InstalledRuntime? {
-        guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: paths.currentRuntimeLink.path) else { return nil }
-        let dir = paths.runtimeRoot.appendingPathComponent(target, isDirectory: true)
+        linkTarget(paths.currentRuntimeLink).flatMap(runtime(named:))
+    }
+
+    /// The runtime directory `name` under `runtime/`, when its receipt and entry points exist.
+    private func runtime(named name: String) -> InstalledRuntime? {
+        let dir = paths.runtimeRoot.appendingPathComponent(name, isDirectory: true)
         guard let receipt = readReceipt(in: dir) else { return nil }
         let runtime = InstalledRuntime(directory: dir, receipt: receipt)
         let fm = FileManager.default
@@ -109,9 +116,13 @@ public final class RuntimeInstaller: @unchecked Sendable {
     }
 
     /// Move a verified staging tree into place, flip `current`, and prune old runtimes.
+    /// The usable runtime this install replaces becomes `previous`; reinstalling the
+    /// current runtime keeps the existing `previous`. Everything else is removed.
     public func activate(staging: URL, directoryName: String, receipt: RuntimeReceipt) throws -> InstalledRuntime {
         let fm = FileManager.default
-        let previous = try? fm.destinationOfSymbolicLink(atPath: paths.currentRuntimeLink.path)
+        let usable = { (name: String) in name == directoryName ? nil : self.runtime(named: name)?.directory.lastPathComponent }
+        let replaced = linkTarget(paths.currentRuntimeLink).flatMap(usable)
+        let kept = linkTarget(paths.previousRuntimeLink).flatMap(usable)
         let final = paths.runtimeRoot.appendingPathComponent(directoryName, isDirectory: true)
         if fm.fileExists(atPath: final.path) {
             let parked = paths.runtimeRoot.appendingPathComponent(".replaced-\(UUID().uuidString)", isDirectory: true)
@@ -119,17 +130,19 @@ public final class RuntimeInstaller: @unchecked Sendable {
             try? fm.removeItem(at: parked)
         }
         try fm.moveItem(at: staging, to: final)
+        try setLink(paths.currentRuntimeLink, to: directoryName)
 
-        // rename(2) over the old link is atomic; readers never observe a missing `current`.
-        let tempLink = paths.runtimeRoot.appendingPathComponent(".current-\(UUID().uuidString)")
-        try fm.createSymbolicLink(atPath: tempLink.path, withDestinationPath: directoryName)
-        guard rename(tempLink.path, paths.currentRuntimeLink.path) == 0 else {
-            let reason = String(cString: strerror(errno))
-            try? fm.removeItem(at: tempLink)
-            throw CommandError("could not switch the current runtime: \(reason)")
-        }
+        let previous = keepsPreviousRuntime ? (replaced ?? kept) : nil
+        try? setLink(paths.previousRuntimeLink, to: previous)
         prune(keeping: Set([directoryName, previous].compactMap { $0 }))
         return InstalledRuntime(directory: final, receipt: receipt)
+    }
+
+    /// Apply a change of `keepsPreviousRuntime` right away: turning it off removes `previous`.
+    public func applyRetention() {
+        guard !keepsPreviousRuntime, let current = linkTarget(paths.currentRuntimeLink) else { return }
+        try? setLink(paths.previousRuntimeLink, to: nil)
+        prune(keeping: [current])
     }
 
     /// Check the extracted tree runs the expected Node and carries the expected dsh.
@@ -161,10 +174,32 @@ public final class RuntimeInstaller: @unchecked Sendable {
         try encoder.encode(receipt).write(to: dir.appendingPathComponent("receipt.json"), options: .atomic)
     }
 
+    private func linkTarget(_ link: URL) -> String? {
+        try? FileManager.default.destinationOfSymbolicLink(atPath: link.path)
+    }
+
+    /// Point `link` at `target`, or remove it for nil. rename(2) over the old link is
+    /// atomic, so readers never observe a missing `current`.
+    private func setLink(_ link: URL, to target: String?) throws {
+        let fm = FileManager.default
+        guard let target else {
+            if linkTarget(link) != nil { try fm.removeItem(at: link) }
+            return
+        }
+        let tempLink = paths.runtimeRoot.appendingPathComponent(".link-\(UUID().uuidString)")
+        try fm.createSymbolicLink(atPath: tempLink.path, withDestinationPath: target)
+        guard rename(tempLink.path, link.path) == 0 else {
+            let reason = String(cString: strerror(errno))
+            try? fm.removeItem(at: tempLink)
+            throw CommandError("could not point runtime/\(link.lastPathComponent) at \(target): \(reason)")
+        }
+    }
+
     private func prune(keeping: Set<String>) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(atPath: paths.runtimeRoot.path) else { return }
-        for name in entries where name != "current" && !keeping.contains(name) {
+        let links = [paths.currentRuntimeLink.lastPathComponent, paths.previousRuntimeLink.lastPathComponent]
+        for name in entries where !links.contains(name) && !keeping.contains(name) {
             // Leftover staging trees from an interrupted install are removed too.
             do {
                 try fm.removeItem(at: paths.runtimeRoot.appendingPathComponent(name))

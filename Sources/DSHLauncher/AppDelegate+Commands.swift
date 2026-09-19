@@ -13,6 +13,7 @@ extension AppDelegate: StatusMenuDelegate {
         case .toggleLaunchAtLogin: toggleLaunchAtLogin()
         case .openLoginItems: LaunchAtLogin.openSystemSettings()
         case .toggleDock: toggleDockIcon()
+        case .toggleKeepPreviousRuntime: toggleKeepPreviousRuntime()
         case .openLogs: NSWorkspace.shared.activateFileViewerSelecting([paths.shellLog, paths.daemonLog])
         case .openDshHome: openDshHome()
         case .editConfig: editConfig()
@@ -85,6 +86,19 @@ extension AppDelegate: StatusMenuDelegate {
         let visible = NSApp.activationPolicy() != .regular
         setDockIconVisible(visible)
         log.log("\(visible ? "showing" : "hiding") Dock icon for current app session")
+    }
+
+    /// Turning it off removes the kept runtime now; turning it on takes effect at the next upgrade.
+    private func toggleKeepPreviousRuntime() {
+        let keep = !keepsPreviousRuntime
+        defaults.set(keep, forKey: Keys.keepPreviousRuntime)
+        menu.model.keepsPreviousRuntime = keep
+        log.log("keep previous runtime after upgrades=\(keep)")
+        // The bootstrap queue also runs installs, so the two never overlap.
+        bootstrapQueue.async { [self] in
+            installer.keepsPreviousRuntime = keep
+            installer.applyRetention()
+        }
     }
 
     private func openDshHome() {

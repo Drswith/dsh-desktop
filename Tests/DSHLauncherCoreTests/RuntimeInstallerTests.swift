@@ -43,6 +43,17 @@ final class RuntimeInstallerTests: XCTestCase {
         return RuntimeInstaller(paths: paths, logger: FileLogger(url: paths.shellLog, echoToStderr: false), payloadDirectory: payload)
     }
 
+    private var runtimeRoot: URL { root.appendingPathComponent("home/runtime") }
+
+    private func link(_ name: String) -> String? {
+        try? FileManager.default.destinationOfSymbolicLink(atPath: runtimeRoot.appendingPathComponent(name).path)
+    }
+
+    /// Everything under `runtime/` except the `current` and `previous` links.
+    private func runtimeDirectories() throws -> Set<String> {
+        Set(try FileManager.default.contentsOfDirectory(atPath: runtimeRoot.path)).subtracting(["current", "previous"])
+    }
+
     func testInstallsOnceThenReuses() throws {
         let (payload, manifest) = try makePayload(dshVersion: "0.1.5-rc.2")
         let subject = installer(payload: payload)
@@ -68,11 +79,59 @@ final class RuntimeInstallerTests: XCTestCase {
         let subject = installer(payload: newPayload)
         let upgraded = try subject.ensureRuntime()
         XCTAssertEqual(upgraded.receipt.dshVersion, "0.1.5-rc.2")
-        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("home/runtime/current").path), newManifest.directoryName)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: old.directory.path), "previous runtime is kept for rollback")
+        XCTAssertEqual(link("current"), newManifest.directoryName)
+        XCTAssertEqual(link("previous"), old.directory.lastPathComponent, "the replaced runtime is kept as previous")
 
         // Launching the older app again keeps the newer runtime.
         XCTAssertEqual(try installer(payload: oldPayload).ensureRuntime().receipt.dshVersion, "0.1.5-rc.2")
+    }
+
+    func testAnotherUpgradeDropsTheOldestRuntime() throws {
+        var manifests: [RuntimeManifest] = []
+        for (index, version) in ["0.1.5-rc.1", "0.1.5-rc.2", "0.1.5"].enumerated() {
+            let (payload, manifest) = try makePayload(dshVersion: version, named: "payload\(index)")
+            _ = try installer(payload: payload).ensureRuntime()
+            manifests.append(manifest)
+        }
+        XCTAssertEqual(link("current"), manifests[2].directoryName)
+        XCTAssertEqual(link("previous"), manifests[1].directoryName)
+        XCTAssertEqual(try runtimeDirectories(), [manifests[2].directoryName, manifests[1].directoryName])
+    }
+
+    func testReinstallingTheCurrentRuntimeKeepsPrevious() throws {
+        let (oldPayload, oldManifest) = try makePayload(dshVersion: "0.1.5-rc.1", named: "old")
+        let (newPayload, newManifest) = try makePayload(dshVersion: "0.1.5-rc.2", named: "new")
+        _ = try installer(payload: oldPayload).ensureRuntime()
+        _ = try installer(payload: newPayload).ensureRuntime()
+        _ = try installer(payload: newPayload).installBundled() // "Reinstall Bundled Runtime"
+        XCTAssertEqual(link("current"), newManifest.directoryName)
+        XCTAssertEqual(link("previous"), oldManifest.directoryName)
+        XCTAssertEqual(try runtimeDirectories(), [newManifest.directoryName, oldManifest.directoryName])
+    }
+
+    func testWithoutKeepingPreviousOnlyCurrentRemains() throws {
+        let (oldPayload, _) = try makePayload(dshVersion: "0.1.5-rc.1", named: "old")
+        let (newPayload, newManifest) = try makePayload(dshVersion: "0.1.5-rc.2", named: "new")
+        _ = try installer(payload: oldPayload).ensureRuntime()
+        let subject = installer(payload: newPayload)
+        subject.keepsPreviousRuntime = false
+        _ = try subject.ensureRuntime()
+        XCTAssertNil(link("previous"))
+        XCTAssertEqual(try runtimeDirectories(), [newManifest.directoryName])
+    }
+
+    func testTurningRetentionOffRemovesPreviousAtOnce() throws {
+        let (oldPayload, _) = try makePayload(dshVersion: "0.1.5-rc.1", named: "old")
+        let (newPayload, newManifest) = try makePayload(dshVersion: "0.1.5-rc.2", named: "new")
+        _ = try installer(payload: oldPayload).ensureRuntime()
+        let subject = installer(payload: newPayload)
+        _ = try subject.ensureRuntime()
+        XCTAssertNotNil(link("previous"))
+        subject.keepsPreviousRuntime = false
+        subject.applyRetention()
+        XCTAssertNil(link("previous"))
+        XCTAssertEqual(link("current"), newManifest.directoryName)
+        XCTAssertEqual(try runtimeDirectories(), [newManifest.directoryName])
     }
 
     func testRejectsTamperedArchive() throws {

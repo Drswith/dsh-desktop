@@ -17,6 +17,8 @@ public struct AppPaths: Sendable {
     public var runtimeRoot: URL { home.appendingPathComponent("runtime", isDirectory: true) }
     /// Symlink naming the active runtime directory (relative target).
     public var currentRuntimeLink: URL { runtimeRoot.appendingPathComponent("current") }
+    /// Symlink naming the runtime the last upgrade replaced, when it is kept.
+    public var previousRuntimeLink: URL { runtimeRoot.appendingPathComponent("previous") }
     public var logsDir: URL { home.appendingPathComponent("logs", isDirectory: true) }
     public var runDir: URL { home.appendingPathComponent("run", isDirectory: true) }
     public var shellLog: URL { logsDir.appendingPathComponent("launcher.log") }
