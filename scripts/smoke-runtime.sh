@@ -34,7 +34,7 @@ pid="$(cat "$SCRATCH/pid")"
 
 for _ in $(seq 1 240); do
   if grep -q '^dsh web: http://127.0.0.1:' "$OUT" 2>/dev/null; then
-    status="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")"
+    status="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")"
     [ "$status" = "401" ] || die "smoke: expected 401 from an unauthenticated /, got $status"
     log "smoke: ready line printed and the server answers (HTTP $status)"
     exit 0

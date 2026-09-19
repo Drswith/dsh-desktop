@@ -37,6 +37,9 @@ mkdir -p "$RUNTIME/app"
 cp "${PROJECT_FILES[@]}" "$RUNTIME/app/"
 log "installing @deepseek-ai/dsh@$LOCKED_DSH_VERSION from runtime/pnpm-lock.yaml with pnpm $PNPM_VERSION on Node $NODE_VERSION ($ARCH)"
 run_pnpm "$RUNTIME" "$RUNTIME/app" "$WORK/pnpm-state" install --prod --frozen-lockfile --reporter=append-only
+# An assignment keeps the check's exit status (a `log "$(…)"` would mask it).
+platform_report="$(check_platform_packages "$RUNTIME" "$RUNTIME/app")" || die "the install is incomplete; rerun to retry the downloads"
+log "$platform_report"
 
 # 4. Drop prebuilt binaries for other platforms and the other Mac architecture.
 OTHER_DARWIN_ARCH="$([ "$NODE_ARCH" = arm64 ] && echo x64 || echo arm64)"

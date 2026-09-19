@@ -55,10 +55,26 @@ install_pnpm() {
 
 # run_pnpm <runtime-dir> <project-dir> <state-dir> <pnpm args...>
 # Runs the bundled pnpm on the bundled Node in a clean environment: fixed registry,
-# the shared cache store, and no user npm/pnpm configuration.
+# the shared cache store, and no user npm/pnpm configuration. HTTP(S)_PROXY and
+# NO_PROXY are the one exception, so builds behind a proxy reach the registry.
 run_pnpm() {
-  local runtime="$1" project="$2" state="$3"
+  local runtime="$1" project="$2" state="$3" proxy_env=() proxy_config=()
   shift 3
+  local https_proxy_value="${HTTPS_PROXY:-${https_proxy:-}}"
+  local http_proxy_value="${HTTP_PROXY:-${http_proxy:-}}"
+  local no_proxy_value="${NO_PROXY:-${no_proxy:-}}"
+  if [ -n "$https_proxy_value" ]; then
+    proxy_env+=("HTTPS_PROXY=$https_proxy_value")
+    proxy_config+=("--config.https-proxy=$https_proxy_value")
+  fi
+  if [ -n "$http_proxy_value" ]; then
+    proxy_env+=("HTTP_PROXY=$http_proxy_value")
+    proxy_config+=("--config.proxy=$http_proxy_value")
+  fi
+  if [ -n "$no_proxy_value" ]; then
+    proxy_env+=("NO_PROXY=$no_proxy_value")
+    proxy_config+=("--config.noproxy=$no_proxy_value")
+  fi
   mkdir -p "$state/config"
   : > "$state/config/npmrc"
   (
@@ -71,6 +87,7 @@ run_pnpm() {
       XDG_CONFIG_HOME="$state/config" \
       XDG_STATE_HOME="$state/state" \
       NPM_CONFIG_USERCONFIG="$state/config/npmrc" \
+      ${proxy_env[@]+"${proxy_env[@]}"} \
       "$runtime/node/bin/node" "$runtime/pnpm/bin/pnpm.mjs" \
         --config.registry="$NPM_REGISTRY" \
         --config.store-dir="$CACHE_DIR/pnpm-store" \
@@ -78,6 +95,43 @@ run_pnpm() {
         --config.userconfig="$state/config/npmrc" \
         --config.package-import-method=clone-or-copy \
         --config.update-notifier=false \
+        --config.fetch-retries=5 \
+        ${proxy_config[@]+"${proxy_config[@]}"} \
         "$@"
   )
+}
+
+# check_platform_packages <runtime-dir> <project-dir>
+# pnpm skips an optional dependency whose download fails, so a flaky network can
+# leave out a native package (sharp's libvips, say) without failing the install.
+# Require every lockfile package built for this macOS architecture to be on disk.
+check_platform_packages() {
+  "$1/node/bin/node" - "$2" "$NODE_ARCH" <<'JS'
+const fs = require('node:fs')
+const path = require('node:path')
+const [project, cpu] = process.argv.slice(2)
+const lock = fs.readFileSync(path.join(project, 'pnpm-lock.yaml'), 'utf8')
+const packages = lock.slice(lock.indexOf('\npackages:\n'), lock.indexOf('\nsnapshots:\n'))
+const list = text => text.split(',').map(item => item.trim().replace(/^'|'$/g, ''))
+const expected = new Set()
+let name, os, arch
+const settle = () => {
+  if (name && os?.includes('darwin') && (arch === undefined || arch.includes(cpu))) expected.add(name)
+}
+for (const line of packages.split('\n')) {
+  const head = line.match(/^  '?((?:@[^/'@]+\/)?[^@']+)@[^:]*'?:$/)
+  if (head) { settle(); [name, os, arch] = [head[1], undefined, undefined]; continue }
+  const osMatch = line.match(/^    os: \[(.*)\]$/)
+  if (osMatch) os = list(osMatch[1])
+  const cpuMatch = line.match(/^    cpu: \[(.*)\]$/)
+  if (cpuMatch) arch = list(cpuMatch[1])
+}
+settle()
+const missing = [...expected].filter(pkg => !fs.existsSync(path.join(project, 'node_modules', pkg, 'package.json')))
+if (missing.length > 0) {
+  console.error(`missing ${missing.length} of ${expected.size} darwin-${cpu} packages: ${missing.join(', ')}`)
+  process.exit(1)
+}
+console.log(`all ${expected.size} darwin-${cpu} platform packages are installed`)
+JS
 }

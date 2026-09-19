@@ -31,7 +31,7 @@ DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳�
 
 ## 构建
 
-前置：Xcode（Swift 6）、网络（首次下载 Node.js、pnpm 与 npm 包）。
+前置：Xcode（Swift 6）、网络（首次下载 Node.js、pnpm 与 npm 包；设置了 `HTTP(S)_PROXY` / `NO_PROXY` 时，curl 下载与 pnpm 安装都会走代理）。
 
 ```bash
 git submodule update --init   # 版本来源
@@ -68,7 +68,7 @@ make app BUILD_NUMBER=202609191  # 显式构建号（分享出去的包建议这
 make app COPYRIGHT="© 2026 Drswith"        # 访达“显示简介”中的版权信息
 ```
 
-payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查，约需 1～2 分钟。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。payload 只在锁文件、版本或签名身份变化时重建（`FORCE=1` 强制重建）。
+payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版本 pnpm，隔离 store/config，`nodeLinker: hoisted`，只允许经过评审的依赖构建脚本（node-pty、koffi、fs-ext、dsh-subprocess-local）。唯一差异是开启 `autoInstallPeers`：官方把全部第一方包显式列为依赖，而从 registry 安装时需要 pnpm 补齐插件包的 service peerDependencies。pnpm 11 安装前会对锁文件里的全部包做一遍供应链策略检查。pnpm 在可选依赖下载失败时只会跳过、不报错，所以安装后会对照锁文件确认当前架构的平台专属包全部到位，缺任何一个都会让构建失败。构建末尾会用临时 `DSH_HOME` 实际启动一次并等待就绪行（`SKIP_SMOKE=1` 可跳过）。payload 只在锁文件、版本或签名身份变化时重建（`FORCE=1` 强制重建）。
 
 ### CI
 
