@@ -15,13 +15,22 @@ concurrency:
 
 jobs:
   build:
-    name: Test and build (macOS arm64)
-    runs-on: macos-26
-    timeout-minutes: 45
+    name: Test and build (macOS ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-26
+          - arch: x86_64
+            runner: macos-26-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     env:
       # CI holds no certificate, so builds are signed ad hoc; the run number
       # gives CI images a monotonic build number.
       BUILD_NUMBER: ${{ github.run_number }}
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -31,6 +40,8 @@ jobs:
         run: |
           sw_vers
           xcodebuild -version
+          # A mislabeled runner would otherwise cross-build under Rosetta and still pass.
+          test "$(uname -m)" = "$ARCH" || { echo "runner is $(uname -m), expected $ARCH"; exit 1; }
           swift --version
 
       # Node.js and pnpm downloads plus the pnpm store; keyed on everything that
@@ -56,7 +67,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: DSH-Launcher-${{ github.run_number }}-arm64
+          name: DSH-Launcher-${{ github.run_number }}-${{ matrix.arch }}
           path: build/*.dmg
           if-no-files-found: error
           retention-days: 14

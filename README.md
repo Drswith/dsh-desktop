@@ -72,7 +72,7 @@ payload 构建方式对齐官方桌面端 seed：由内置 Node 运行固定版�
 
 ### CI
 
-推送到 `main` 或提交 PR 时，[GitHub Actions](.github/workflows/ci.yml) 在 macOS 26（Apple Silicon）上检查脚本语法、运行测试、构建 App 与 DMG，并把 DMG 作为构建产物保留 14 天。CI 没有证书，产物使用 ad-hoc 签名；构建号取 CI 的运行序号。Node.js、pnpm 下载与 pnpm store 按锁文件缓存。
+推送到 `main` 或提交 PR 时，[GitHub Actions](.github/workflows/ci.yml) 分别在 macOS 26 的 Apple Silicon（`macos-26`）与 Intel（`macos-26-intel`）运行器上检查脚本语法、运行测试、构建各自架构的 App 与 DMG，并把两个 DMG 作为构建产物保留 14 天。CI 没有证书，产物使用 ad-hoc 签名；构建号取 CI 的运行序号。Node.js、pnpm 下载与 pnpm store 按锁文件缓存。
 
 ### 签名
 
