@@ -97,6 +97,10 @@ NODE_VERSION="${NODE_VERSION:-$(submodule_node_version)}"
 NODE_VERSION="${NODE_VERSION:-24.17.0}"
 PNPM_VERSION="${PNPM_VERSION:-$(submodule_pnpm_version)}"
 PNPM_VERSION="${PNPM_VERSION:-11.7.0}"
+# pnpm's per-request timeout. The default keeps a stalled request (its supply-chain
+# policy check, say) from hanging the build; raise it on a slow link when a single
+# package is too large to arrive in time, e.g. PNPM_FETCH_TIMEOUT=600000 make lock.
+PNPM_FETCH_TIMEOUT="${PNPM_FETCH_TIMEOUT:-60000}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_REGISTRY="${NPM_REGISTRY%/}/"
 NODE_DIST_URL="${NODE_DIST_URL:-https://nodejs.org/download/release}"

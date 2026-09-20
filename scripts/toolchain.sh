@@ -96,7 +96,7 @@ run_pnpm() {
         --config.package-import-method=clone-or-copy \
         --config.update-notifier=false \
         --config.fetch-retries=5 \
-        --config.fetch-timeout=600000 \
+        --config.fetch-timeout="$PNPM_FETCH_TIMEOUT" \
         ${proxy_config[@]+"${proxy_config[@]}"} \
         "$@"
   )
