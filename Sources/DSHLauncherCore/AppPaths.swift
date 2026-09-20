@@ -19,12 +19,19 @@ public struct AppPaths: Sendable {
     public var currentRuntimeLink: URL { runtimeRoot.appendingPathComponent("current") }
     /// Symlink naming the runtime the last upgrade replaced, when it is kept.
     public var previousRuntimeLink: URL { runtimeRoot.appendingPathComponent("previous") }
+    /// Symlink naming a downloaded runtime waiting to be switched to.
+    public var pendingRuntimeLink: URL { runtimeRoot.appendingPathComponent("pending") }
+    public var downloadsDir: URL { home.appendingPathComponent("downloads", isDirectory: true) }
     public var logsDir: URL { home.appendingPathComponent("logs", isDirectory: true) }
     public var runDir: URL { home.appendingPathComponent("run", isDirectory: true) }
     public var shellLog: URL { logsDir.appendingPathComponent("launcher.log") }
     public var daemonLog: URL { logsDir.appendingPathComponent("dsh.log") }
     public var daemonStateFile: URL { runDir.appendingPathComponent("daemon.json") }
     public var lockFile: URL { runDir.appendingPathComponent("launcher.lock") }
+    /// A switch to a new runtime that the service has not yet confirmed by starting on it.
+    public var runtimeActivationFile: URL { runDir.appendingPathComponent("runtime-activation.json") }
+    /// Update bookkeeping that outlives one launch, such as runtimes that failed to start.
+    public var updateStateFile: URL { runDir.appendingPathComponent("update-state.json") }
     public var configFile: URL { home.appendingPathComponent("config.json") }
 
     /// Create the tree with owner-only permissions.

@@ -18,6 +18,10 @@ extension AppDelegate: StatusMenuDelegate {
         case .openDshHome: openDshHome()
         case .editConfig: editConfig()
         case .repair: confirmRepair()
+        case .checkForUpdates: checkForUpdates(userInitiated: true)
+        case .applyUpdate: switchToPendingRuntime(force: true)
+        case .channelStable: setUpdateChannel(.stable)
+        case .channelPreview: setUpdateChannel(.preview)
         case .about: showAboutPanel(nil)
         case .quit: NSApp.terminate(nil)
         }
@@ -130,9 +134,15 @@ extension AppDelegate: StatusMenuDelegate {
 
     private func confirmRepair() {
         let version = installer.bundledManifest()?.dshVersion ?? "?"
+        var body = L10n.tr("dialog.repair.body", version)
+        // After an update the bundled runtime can be older than the one in use.
+        if let installed = installer.currentRuntime()?.receipt.dshVersion,
+           let current = SemVer(installed), let bundled = SemVer(version), bundled < current {
+            body += "\n\n" + L10n.tr("dialog.repair.downgrade", installed, version)
+        }
         let choice = alert(
             title: L10n.tr("dialog.repair.title"),
-            body: L10n.tr("dialog.repair.body", version),
+            body: body,
             buttons: [L10n.tr("dialog.repair.action"), L10n.tr("dialog.cancel")]
         )
         guard choice == .alertFirstButtonReturn else { return }
@@ -211,7 +221,7 @@ extension AppDelegate: StatusMenuDelegate {
     }
 
     @discardableResult
-    private func alert(title: String, body: String, buttons: [String] = []) -> NSApplication.ModalResponse {
+    func alert(title: String, body: String, buttons: [String] = []) -> NSApplication.ModalResponse {
         let dialog = NSAlert()
         dialog.messageText = title
         dialog.informativeText = body

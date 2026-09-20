@@ -51,9 +51,35 @@
 "dialog.repair.title" = "Reinstall the bundled runtime?";
 "dialog.repair.body" = "The service stops, the runtime bundled with this app (DSH %@) is extracted again, and the service restarts. Sessions, settings and credentials in your DSH data folder are not touched.";
 "dialog.repair.action" = "Reinstall";
+"dialog.repair.downgrade" = "You are on the updated DSH %@; reinstalling goes back to the bundled DSH %@. The newer version may have upgraded your session data, which the older one might not read.";
 "dialog.launchAtLogin.title" = "Approval needed";
 "dialog.launchAtLogin.approval" = "Allow %@ in System Settings › General › Login Items to launch it at login.";
 "dialog.launchAtLogin.failed" = "Could not change Launch at Login: %@";
+
+/* Runtime updates */
+"menu.checkForUpdates" = "Check for Updates…";
+"menu.updateChannel" = "Update Channel";
+"menu.channel.stable" = "Stable";
+"menu.channel.preview" = "Preview";
+"menu.update.checking" = "Checking for updates…";
+"menu.update.downloading" = "Downloading DSH %@…";
+"menu.update.staged" = "DSH %@ downloaded; switching when idle";
+"menu.update.applyNow" = "Restart Service to Update to DSH %@";
+"menu.update.applying" = "Switching to DSH %@…";
+"menu.update.updated" = "Updated to DSH %@";
+"menu.update.rolledBack" = "DSH %@ failed to start; back on DSH %@";
+"menu.update.failed" = "Update check failed; see the logs";
+"dialog.update.upToDate.title" = "DSH is up to date";
+"dialog.update.upToDate.body" = "DSH %@ is the newest version on the %@ channel.";
+"dialog.update.none.title" = "No update to install";
+"dialog.update.none.body" = "The channel has nothing this Mac can install right now (%@).";
+"dialog.update.staged.title" = "DSH %@ downloaded";
+"dialog.update.staged.body" = "Restart the service to switch to it, or let it switch once the service is idle. If the service cannot start on it, the current version comes back.";
+"dialog.update.staged.now" = "Restart Service Now";
+"dialog.update.staged.later" = "Switch When Idle";
+"dialog.update.failed.title" = "Could not check for updates";
+"dialog.update.external.title" = "Automatic updates do not apply";
+"dialog.update.external.body" = "config.json names its own runtime; automatic updates only manage the bundled runtime.";
 
 /* About */
 "about.copy" = "Copy";

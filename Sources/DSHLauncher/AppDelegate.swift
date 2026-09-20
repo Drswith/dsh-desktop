@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let configuredLaunchAtLogin = "didConfigureLaunchAtLogin"
         static let skipQuitConfirmation = "skipQuitConfirmation"
         static let keepPreviousRuntime = "keepPreviousRuntime"
+        static let updateChannel = "updateChannel"
     }
 
     /// Keep the runtime an upgrade replaces (on by default: dsh previews change quickly).
@@ -49,6 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set for SIGTERM/SIGINT: nobody is at the screen to answer the quit confirmation.
     private var quitWithoutConfirmation = false
 
+    // Runtime updates (AppDelegate+Updates.swift); nil `updater` means updates are off.
+    var updater: RuntimeUpdater?
+    let updateQueue = DispatchQueue(label: "dsh-launcher.updates")
+    var updateTimer: DispatchSourceTimer?
+    var idleSwitchTimer: DispatchSourceTimer?
+    var updateCheckInFlight = false
+    var lastBusyLog = Date.distantPast
+
     private var openRequestNotification: Notification.Name { Notification.Name("\(info.bundleIdentifier).open") }
 
     // MARK: Lifecycle
@@ -82,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.launchAtLogin = LaunchAtLogin.status
         menu = StatusMenuController(model: model)
         menu.delegate = self
+        configureUpdates()
         observeSystem()
         configureLaunchAtLoginOnFirstRun()
 
@@ -149,6 +159,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 reloadConfig()
                 var runtime: InstalledRuntime?
                 if config.runtime == nil {
+                    // Every (re)start is a switch point for a downloaded runtime.
+                    if !reinstall { beginPendingRuntimeSwitch() }
                     if reinstall {
                         DispatchQueue.main.async { self.setInstalling(true) }
                         runtime = try installer.installBundled()
@@ -259,8 +271,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func daemonStateChanged(_ state: DaemonState) {
         menu.model.state = state
+        if settleRuntimeSwitch(state) { return }
         switch state {
         case .running(let daemon):
+            scheduleUpdateChecks()
             if openWhenReady {
                 openWhenReady = false
                 openBrowser(daemon)

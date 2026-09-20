@@ -43,8 +43,8 @@ public struct RuntimeReceipt: Codable, Equatable, Sendable {
     public enum Source: String, Codable, Sendable {
         /// Extracted from the app bundle payload.
         case bundle
-        /// Installed later from the npm registry by the in-app updater.
-        case registry
+        /// Downloaded from the update feed by the in-app updater.
+        case update
     }
 
     public var schemaVersion: Int

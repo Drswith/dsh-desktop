@@ -70,5 +70,9 @@
 	<string>@BUILD_DATE@</string>
 	<key>DSHLauncherRepoURL</key>
 	<string>@REPO_URL@</string>
+	<key>DSHLauncherUpdateFeedURL</key>
+	<string>@UPDATE_FEED_URL@</string>
+	<key>DSHLauncherUpdatePublicKey</key>
+	<string>@UPDATE_PUBLIC_KEY@</string>
 </dict>
 </plist>

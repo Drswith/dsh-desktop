@@ -1,4 +1,5 @@
 import AppKit
+import DSHLauncherCore
 import ServiceManagement
 
 /// Build-time identity and defaults, injected into Info.plist (the `DSHLauncher*`
@@ -51,6 +52,25 @@ struct AppInfo {
         return candidates.compactMap { $0 }.first {
             FileManager.default.fileExists(atPath: $0.appendingPathComponent("manifest.json").path)
         }
+    }
+
+    /// The signed update feed: Info.plist values, overridable for development with
+    /// DSH_LAUNCHER_UPDATE_FEED and DSH_LAUNCHER_UPDATE_PUBLIC_KEY. Nil, as in builds
+    /// made before the signing key exists, turns updates off.
+    var updateFeed: UpdateFeed? {
+        let environment = ProcessInfo.processInfo.environment
+        guard let base = (environment["DSH_LAUNCHER_UPDATE_FEED"] ?? string("DSHLauncherUpdateFeedURL")).flatMap(URL.init(string:)),
+              let key = environment["DSH_LAUNCHER_UPDATE_PUBLIC_KEY"] ?? string("DSHLauncherUpdatePublicKey") else { return nil }
+        return UpdateFeed(baseURL: base, publicKey: key)
+    }
+
+    /// The architecture this build runs as, which the runtimes it takes must match.
+    static var architecture: String {
+        #if arch(arm64)
+        return "arm64"
+        #else
+        return "x86_64"
+        #endif
     }
 
     /// Login items registered from a build folder break once the app moves.

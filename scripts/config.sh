@@ -117,6 +117,16 @@ check_locked_version() {
   [ "$LOCKED_DSH_VERSION" = "$DSH_VERSION" ] || die "runtime/package.json locks dsh $LOCKED_DSH_VERSION but the build expects $DSH_VERSION; run: make lock DSH_VERSION=$DSH_VERSION"
 }
 
+# --- Runtime updates ---
+# The app checks <UPDATE_FEED_URL>/<channel>.json and trusts it only when it is signed
+# by the Ed25519 key whose raw public half (base64) is Resources/update-public-key.txt.
+# Without that file the app is built with updates off.
+UPDATE_FEED_URL="${UPDATE_FEED_URL:-https://github.com/Drswith/dsh-launcher/releases/download/update-feed}"
+if [ -z "${UPDATE_PUBLIC_KEY:-}" ] && [ -f "$ROOT/Resources/update-public-key.txt" ]; then
+  UPDATE_PUBLIC_KEY="$(tr -d ' \n' < "$ROOT/Resources/update-public-key.txt")"
+fi
+UPDATE_PUBLIC_KEY="${UPDATE_PUBLIC_KEY:-}"
+
 # --- Locations ---
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 CACHE_DIR="${CACHE_DIR:-$ROOT/.cache}"

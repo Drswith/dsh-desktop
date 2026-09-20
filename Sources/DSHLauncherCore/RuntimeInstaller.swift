@@ -20,9 +20,22 @@ public struct InstalledRuntime: Equatable, Sendable {
     static func dshManifest(in dir: URL) -> URL { dir.appendingPathComponent("app/node_modules/@deepseek-ai/dsh/package.json") }
 }
 
-/// Installs the bundled payload into `~/.dsh-launcher/runtime/<id>` and flips the
-/// `current` symlink atomically. The runtime an upgrade replaces stays behind as
-/// `previous`, at most one, unless `keepsPreviousRuntime` is off.
+/// `run/runtime-activation.json`: a switch to a new runtime, on probation until the
+/// service starts on it.
+public struct RuntimeActivation: Codable, Equatable, Sendable {
+    public var directoryName: String
+    public var identity: String
+    public var dshVersion: String
+    /// The runtime switched away from, restored if the new one cannot start.
+    public var replaced: String?
+    public var replacedPrevious: String?
+    public var startedAt: String
+}
+
+/// Installs runtimes into `~/.dsh-launcher/runtime/<id>` and flips the `current`
+/// symlink atomically: the bundled payload, and downloaded updates staged as
+/// `pending` until they are switched to on probation. The runtime an upgrade
+/// replaces stays behind as `previous`, at most one, unless `keepsPreviousRuntime` is off.
 public final class RuntimeInstaller: @unchecked Sendable {
     private let paths: AppPaths
     private let logger: FileLogger
@@ -81,10 +94,16 @@ public final class RuntimeInstaller: @unchecked Sendable {
         guard let payloadDirectory, let manifest = bundledManifest() else {
             throw CommandError("no bundled runtime payload")
         }
-        let archive = payloadDirectory.appendingPathComponent(manifest.archive)
+        let staged = try stage(archive: payloadDirectory.appendingPathComponent(manifest.archive), manifest: manifest, source: .bundle)
+        return try activate(staged)
+    }
+
+    /// Check `archive` against `manifest`, extract and verify it, and move it into
+    /// `runtime/<directoryName>` without switching to it.
+    public func stage(archive: URL, manifest: RuntimeManifest, source: RuntimeReceipt.Source) throws -> InstalledRuntime {
         let digest = try Self.sha256(of: archive)
         guard digest == manifest.archiveSHA256 else {
-            throw CommandError("payload checksum mismatch: expected \(manifest.archiveSHA256), got \(digest)")
+            throw CommandError("runtime archive checksum mismatch: expected \(manifest.archiveSHA256), got \(digest)")
         }
         let fm = FileManager.default
         try paths.prepare()
@@ -94,8 +113,8 @@ public final class RuntimeInstaller: @unchecked Sendable {
 
         let started = Date()
         try CommandRunner.check("/usr/bin/aa", ["extract", "-d", staging.path, "-i", archive.path], timeout: 600)
-        // The payload is sealed by the app signature and verified above; downloaded
-        // app bundles must not leak quarantine onto extracted native modules.
+        // The archive is verified above; neither a downloaded app bundle nor a
+        // download may leak quarantine onto the extracted native modules.
         _ = try? CommandRunner.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", staging.path], timeout: 120)
         try verify(runtimeAt: staging, dshVersion: manifest.dshVersion, nodeVersion: manifest.nodeVersion)
 
@@ -105,44 +124,136 @@ public final class RuntimeInstaller: @unchecked Sendable {
             nodeVersion: manifest.nodeVersion,
             pnpmVersion: manifest.pnpmVersion,
             arch: manifest.arch,
-            source: .bundle,
+            source: source,
             installedAt: ISO8601DateFormatter().string(from: Date())
         )
         try writeReceipt(receipt, in: staging)
-        let installed = try activate(staging: staging, directoryName: manifest.directoryName, receipt: receipt)
-        logger.log(String(format: "runtime installed dsh=%@ node=%@ dir=%@ in %.1fs",
-                          manifest.dshVersion, manifest.nodeVersion, manifest.directoryName, Date().timeIntervalSince(started)))
-        return installed
-    }
-
-    /// Move a verified staging tree into place, flip `current`, and prune old runtimes.
-    /// The usable runtime this install replaces becomes `previous`; reinstalling the
-    /// current runtime keeps the existing `previous`. Everything else is removed.
-    public func activate(staging: URL, directoryName: String, receipt: RuntimeReceipt) throws -> InstalledRuntime {
-        let fm = FileManager.default
-        let usable = { (name: String) in name == directoryName ? nil : self.runtime(named: name)?.directory.lastPathComponent }
-        let replaced = linkTarget(paths.currentRuntimeLink).flatMap(usable)
-        let kept = linkTarget(paths.previousRuntimeLink).flatMap(usable)
-        let final = paths.runtimeRoot.appendingPathComponent(directoryName, isDirectory: true)
+        let final = paths.runtimeRoot.appendingPathComponent(manifest.directoryName, isDirectory: true)
         if fm.fileExists(atPath: final.path) {
             let parked = paths.runtimeRoot.appendingPathComponent(".replaced-\(UUID().uuidString)", isDirectory: true)
             try fm.moveItem(at: final, to: parked)
             try? fm.removeItem(at: parked)
         }
         try fm.moveItem(at: staging, to: final)
-        try setLink(paths.currentRuntimeLink, to: directoryName)
-
-        let previous = keepsPreviousRuntime ? (replaced ?? kept) : nil
-        try? setLink(paths.previousRuntimeLink, to: previous)
-        prune(keeping: Set([directoryName, previous].compactMap { $0 }))
+        logger.log(String(format: "runtime staged dsh=%@ node=%@ source=%@ dir=%@ in %.1fs", manifest.dshVersion,
+                          manifest.nodeVersion, source.rawValue, manifest.directoryName, Date().timeIntervalSince(started)))
         return InstalledRuntime(directory: final, receipt: receipt)
     }
 
-    /// Apply a change of `keepsPreviousRuntime` right away: turning it off removes `previous`.
+    /// Switch to a staged runtime and prune old ones, ending any switch on probation.
+    /// The usable runtime it replaces becomes `previous`; reinstalling the current
+    /// runtime keeps the existing `previous`. Everything else except `pending` goes.
+    @discardableResult
+    public func activate(_ runtime: InstalledRuntime) throws -> InstalledRuntime {
+        let name = runtime.directory.lastPathComponent
+        let usable = { (other: String) in other == name ? nil : self.runtime(named: other)?.directory.lastPathComponent }
+        let replaced = linkTarget(paths.currentRuntimeLink).flatMap(usable)
+        let kept = linkTarget(paths.previousRuntimeLink).flatMap(usable)
+        try setLink(paths.currentRuntimeLink, to: name)
+        try? FileManager.default.removeItem(at: paths.runtimeActivationFile)
+        if linkTarget(paths.pendingRuntimeLink) == name { try? setLink(paths.pendingRuntimeLink, to: nil) }
+
+        let previous = keepsPreviousRuntime ? (replaced ?? kept) : nil
+        try? setLink(paths.previousRuntimeLink, to: previous)
+        prune(keeping: Set([name, previous].compactMap { $0 }))
+        return runtime
+    }
+
+    /// Apply a change of `keepsPreviousRuntime` right away: turning it off removes
+    /// `previous`, unless a switch on probation may still need to go back to it.
     public func applyRetention() {
-        guard !keepsPreviousRuntime, let current = linkTarget(paths.currentRuntimeLink) else { return }
+        guard !keepsPreviousRuntime, currentActivation() == nil, let current = linkTarget(paths.currentRuntimeLink) else { return }
         try? setLink(paths.previousRuntimeLink, to: nil)
         prune(keeping: [current])
+    }
+
+    // MARK: Updates
+
+    /// The downloaded runtime waiting to be switched to.
+    public func pendingRuntime() -> InstalledRuntime? {
+        linkTarget(paths.pendingRuntimeLink).flatMap(runtime(named:))
+    }
+
+    /// Mark a staged runtime as the next one to switch to, or clear the mark. A
+    /// pending runtime superseded here is removed unless it is in use.
+    public func setPending(_ runtime: InstalledRuntime?) throws {
+        let name = runtime?.directory.lastPathComponent
+        let superseded = linkTarget(paths.pendingRuntimeLink)
+        try setLink(paths.pendingRuntimeLink, to: name)
+        guard let superseded, superseded != name,
+              ![linkTarget(paths.currentRuntimeLink), linkTarget(paths.previousRuntimeLink)].contains(superseded) else { return }
+        try? FileManager.default.removeItem(at: paths.runtimeRoot.appendingPathComponent(superseded, isDirectory: true))
+        logger.log("runtime pruned \(superseded)")
+    }
+
+    /// Switch to the pending runtime on probation: `current` moves to it and
+    /// `previous` to the runtime it replaces, and nothing is pruned until the
+    /// service starts on it (`confirmActivation`) or cannot (`rollBackActivation`).
+    /// A pending runtime older than the bundled one is dropped instead.
+    public func beginPendingActivation() throws -> RuntimeActivation? {
+        guard let pending = pendingRuntime() else { return nil }
+        if let bundled = bundledManifest().flatMap({ SemVer($0.dshVersion) }),
+           let waiting = SemVer(pending.receipt.dshVersion), bundled > waiting {
+            logger.log("dropping pending runtime dsh=\(waiting): the bundled dsh=\(bundled) is newer")
+            try? setPending(nil)
+            return nil
+        }
+        let name = pending.directory.lastPathComponent
+        let activation = RuntimeActivation(
+            directoryName: name,
+            identity: pending.receipt.identity,
+            dshVersion: pending.receipt.dshVersion,
+            replaced: linkTarget(paths.currentRuntimeLink),
+            replacedPrevious: linkTarget(paths.previousRuntimeLink),
+            startedAt: ISO8601DateFormatter().string(from: Date())
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(activation).write(to: paths.runtimeActivationFile, options: .atomic)
+        try setLink(paths.currentRuntimeLink, to: name)
+        try? setLink(paths.previousRuntimeLink, to: activation.replaced)
+        try? setLink(paths.pendingRuntimeLink, to: nil)
+        logger.log("runtime switching to dsh=\(activation.dshVersion) on probation, replacing \(activation.replaced ?? "nothing")")
+        return activation
+    }
+
+    /// The switch waiting for the service to start on its runtime, if any.
+    public func currentActivation() -> RuntimeActivation? {
+        guard let data = try? Data(contentsOf: paths.runtimeActivationFile) else { return nil }
+        return try? JSONDecoder().decode(RuntimeActivation.self, from: data)
+    }
+
+    /// The service started on the new runtime: keep it and apply the retention setting.
+    public func confirmActivation() {
+        guard let activation = currentActivation() else { return }
+        try? FileManager.default.removeItem(at: paths.runtimeActivationFile)
+        let previous = keepsPreviousRuntime ? activation.replaced.flatMap { runtime(named: $0)?.directory.lastPathComponent } : nil
+        try? setLink(paths.previousRuntimeLink, to: previous)
+        prune(keeping: Set([activation.directoryName, previous].compactMap { $0 }))
+        logger.log("runtime dsh=\(activation.dshVersion) confirmed")
+    }
+
+    /// The service could not start on the new runtime: go back to the runtime it
+    /// replaced and remove the failed one. Nil when nothing usable is left to go back to.
+    public func rollBackActivation() -> InstalledRuntime? {
+        guard let activation = currentActivation() else { return nil }
+        try? FileManager.default.removeItem(at: paths.runtimeActivationFile)
+        guard let replacedName = activation.replaced, let replaced = runtime(named: replacedName) else {
+            logger.log("runtime dsh=\(activation.dshVersion) failed to start and no earlier runtime is left to go back to")
+            return nil
+        }
+        do {
+            try setLink(paths.currentRuntimeLink, to: replacedName)
+        } catch {
+            logger.log("runtime rollback failed: \(error.localizedDescription)")
+            return nil
+        }
+        try? setLink(paths.previousRuntimeLink, to: activation.replacedPrevious.flatMap { runtime(named: $0)?.directory.lastPathComponent })
+        if activation.directoryName != replacedName {
+            try? FileManager.default.removeItem(at: paths.runtimeRoot.appendingPathComponent(activation.directoryName, isDirectory: true))
+        }
+        logger.log("runtime dsh=\(activation.dshVersion) failed to start; back on dsh=\(replaced.receipt.dshVersion)")
+        return replaced
     }
 
     /// Check the extracted tree runs the expected Node and carries the expected dsh.
@@ -195,11 +306,16 @@ public final class RuntimeInstaller: @unchecked Sendable {
         }
     }
 
+    /// Remove every runtime directory except `keeping`, the pending runtime, and those
+    /// a switch on probation may go back to.
     private func prune(keeping: Set<String>) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(atPath: paths.runtimeRoot.path) else { return }
-        let links = [paths.currentRuntimeLink.lastPathComponent, paths.previousRuntimeLink.lastPathComponent]
-        for name in entries where !links.contains(name) && !keeping.contains(name) {
+        let links = [paths.currentRuntimeLink, paths.previousRuntimeLink, paths.pendingRuntimeLink].map(\.lastPathComponent)
+        let activation = currentActivation()
+        let protected = keeping.union([linkTarget(paths.pendingRuntimeLink), activation?.directoryName,
+                                       activation?.replaced, activation?.replacedPrevious].compactMap { $0 })
+        for name in entries where !links.contains(name) && !protected.contains(name) {
             // Leftover staging trees from an interrupted install are removed too.
             do {
                 try fm.removeItem(at: paths.runtimeRoot.appendingPathComponent(name))

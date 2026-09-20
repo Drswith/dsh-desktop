@@ -29,6 +29,19 @@ DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳�
 5. **看门狗**：每 15 秒对 `/` 做一次原始 socket 探测（未认证返回 401 即视为存活），连续 3 次失败则重启；睡眠/唤醒有宽限期；异常退出按 1/2/5/10/30 秒退避重启，10 分钟内 5 次则进入失败态并弹窗显示 stderr 摘要。
 6. **退出**：服务运行时，托盘菜单的“退出”、`⌘Q`、程序坞的“退出”、活动监视器或 AppleScript 发来的退出都会先弹确认（可勾选“不再询问”）；注销、重启、关机和 `SIGTERM` 不弹确认。确认后先 SIGTERM dsh（最多等 8 秒，再对进程组 SIGKILL），然后壳才退出。壳崩溃遗留的 dsh 会在下次启动时按 `run/daemon.json` 识别并清理。
 
+## 运行时更新
+
+dsh 更新很快，运行时不必等 App 发版，可以单独更新：
+
+1. **检查**：服务第一次就绪 30 秒后检查一次，之后每 6 小时一次；菜单“检查更新…”可随时手动检查。频道在菜单“更新频道”里选：稳定跟随 npm 的 `latest`，预览跟随 `latest`、`next`、`alpha` 中最新的版本，默认稳定。
+2. **校验**：更新源是本仓库 GitHub Releases 里的 `update-feed`，每个频道一份清单 `<频道>.json`，外加 Ed25519 签名 `<频道>.json.sig`。签名不符、频道不符、要求更新版本的外壳、版本不比当前新，都不会下载。App 内置的公钥来自 `Resources/update-public-key.txt`；构建时没有这个文件，就不启用更新。
+3. **暂存**：下载到 `downloads/`，核对大小和 SHA-256 后解压并验证，放进新的运行时目录，记为 `runtime/pending`，暂不切换。
+4. **切换**：服务空闲时自动重启到新版本。“空闲”指 dsh 没有子进程（终端、工具命令），并且 10 分钟内没有写入会话日志；dsh 的接口是随版本变化的内部协议，这里不依赖它。服务忙时，菜单显示“立即重启服务以更新到 DSH x”，由你决定何时切换；下次启动 App 或手动重启服务时也会切换。
+5. **启动确认**：切换后，新运行时处于试用状态（`run/runtime-activation.json`），服务就绪才算确认。如果服务在就绪前退出或进入失败态，就退回原来的运行时、删掉新的，并把这个版本记进 `run/update-state.json`，以后不再提供。确认前旧运行时一定保留，确认后再按“升级后保留上一个运行时”处理。
+6. **不降级**：频道里的版本不比当前新就不动，切回稳定频道也不会退到旧版，因为新版 dsh 可能已经迁移过会话数据。内置运行时比已安装的旧时，“重新安装内置运行时”会先提醒。
+
+开发时可以用环境变量覆盖：`DSH_LAUNCHER_UPDATE_FEED`（更新源地址）、`DSH_LAUNCHER_UPDATE_PUBLIC_KEY`（公钥）、`DSH_LAUNCHER_UPDATE_DELAY`（首次检查的延迟秒数）、`DSH_LAUNCHER_IDLE_POLL`（空闲检查的间隔秒数）。
+
 ## 构建
 
 前置：Xcode（Swift 6）、网络（首次下载 Node.js、pnpm 与 npm 包；设置了 `HTTP(S)_PROXY` / `NO_PROXY` 时，curl 下载与 pnpm 安装都会走代理）。
@@ -122,11 +135,15 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCD
 ~/.dsh-launcher/
 ├── runtime/current -> dsh-<ver>-node-<ver>-<arch>-<sha8>/
 ├── runtime/previous -> …        # 上次升级前的运行时，关闭“升级后保留上一个运行时”则没有
+├── runtime/pending -> …         # 已下载、等待切换的更新
 │   ├── node/  pnpm/  app/node_modules/@deepseek-ai/dsh
 │   └── bin/dsh, bin/pnpm        # 终端可用的 shim，例如 dsh plugin --profile launcher add <pkg>
+├── downloads/                   # 正在下载的运行时更新
 ├── logs/launcher.log            # 外壳日志
 ├── logs/dsh.log                 # dsh stdout/stderr（token 已脱敏）
 ├── run/daemon.json, launcher.lock
+├── run/runtime-activation.json  # 试用中的运行时切换
+├── run/update-state.json        # 启动失败、不再提供的版本
 └── config.json                  # 可选，菜单“编辑配置…”会创建
 
 ~/.dsh/                          # dsh 自己的数据：会话、设置、凭据，与 CLI 共享
@@ -155,7 +172,7 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCD
 
 ## 菜单与深链接
 
-菜单：状态与运行时版本、打开 DSH（⌘O）、复制访问链接、重启/停止/启动服务、登录时启动（含“需要批准”状态）、隐藏 / 显示 Dock 图标、升级后保留上一个运行时（默认开启）、在访达中显示日志、打开 DSH 数据目录、编辑配置、重新安装内置运行时、关于、退出。
+菜单：状态与运行时版本、打开 DSH（⌘O）、复制访问链接、重启/停止/启动服务、登录时启动（含“需要批准”状态）、隐藏 / 显示 Dock 图标、升级后保留上一个运行时（默认开启）、在访达中显示日志、打开 DSH 数据目录、编辑配置、重新安装内置运行时、更新状态、检查更新、更新频道（稳定 / 预览）、关于、退出。
 
 “关于”窗口参照 VS Code 的格式：应用图标和名称下逐行列出 Version、GitHub（仓库不在 GitHub 时为 Repo）、Commit、Date（附相对时间）、DSH / Node.js / pnpm 版本和 OS；“复制”按钮把这些信息放进剪贴板，方便反馈问题。状态栏菜单和 Dock 模式下的应用菜单共用这个窗口。
 
@@ -169,15 +186,19 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: you@example.com (ABCD
 
 | 路径 | 职责 |
 |---|---|
-| `Sources/DSHLauncherCore/RuntimeInstaller.swift` | payload 校验、解压、版本验证、原子切换与清理 |
+| `Sources/DSHLauncherCore/RuntimeInstaller.swift` | 内置与下载运行时的校验、解压、版本验证、暂存、原子切换、试用确认与退回、清理 |
+| `Sources/DSHLauncherCore/UpdateFeed.swift` | 更新清单格式与 Ed25519 签名校验 |
+| `Sources/DSHLauncherCore/RuntimeUpdater.swift` | 是否更新的判断、下载与校验 |
+| `Sources/DSHLauncherCore/ActivityProbe.swift` | 判断服务是否空闲 |
 | `Sources/DSHLauncherCore/DaemonSupervisor.swift` | 启动、就绪识别、看门狗、崩溃退避、优雅停止、孤儿清理 |
 | `Sources/DSHLauncherCore/ProcessSpawner.swift` | `posix_spawn`：独立进程组、默认信号处置、不泄漏描述符 |
 | `Sources/DSHLauncherCore/ShellEnvironment.swift` | 登录 shell 环境解析与合成 |
-| `Sources/DSHLauncher/` | AppKit：状态栏菜单、状态窗口、登录项、深链接、中英文本地化 |
+| `Sources/DSHLauncher/` | AppKit：状态栏菜单、状态窗口、登录项、深链接、中英文本地化；`AppDelegate+Updates.swift` 负责检查、暂存、空闲切换、启动确认与退回 |
 | `scripts/` | payload 构建、冒烟启动、App 组装与签名、DMG |
 
 ## 后续工作
 
 - **对外分发**：需要 Developer ID Application 证书（付费开发者计划）并完成公证（`notarytool` 提交、`stapler` 装订）。
-- **自更新**：App 可接入 Sparkle；新版本自带的运行时会在启动时自动替换。
+- **更新源发布**：CI 跟进 npm 的新版本，构建运行时并签名发布到 `update-feed`。在此之前构建的 App 没有公钥，不会启用运行时更新。
+- **外壳自更新**：下载新 App 并校验后替换、重启，失败则恢复旧 App。
 - **可选窗口模式**：用 WKWebView 承载同一 URL，作为浏览器之外的选项。

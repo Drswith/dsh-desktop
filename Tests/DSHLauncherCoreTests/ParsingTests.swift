@@ -146,7 +146,7 @@ final class InstallDecisionTests: XCTestCase {
         XCTAssertEqual(InstallDecision.decide(bundled: bundled, installed: receipt(for: bundled), installedUsable: true), .reuseInstalled)
         XCTAssertEqual(InstallDecision.decide(bundled: bundled, installed: receipt(for: bundled), installedUsable: false), .installBundled(reason: "installed_unusable"))
         XCTAssertEqual(InstallDecision.decide(bundled: bundled, installed: receipt(for: manifest("0.1.5-rc.1")), installedUsable: true), .installBundled(reason: "upgrade"))
-        XCTAssertEqual(InstallDecision.decide(bundled: bundled, installed: receipt(for: manifest("0.1.6-alpha.2"), source: .registry), installedUsable: true), .keepInstalledNewer)
+        XCTAssertEqual(InstallDecision.decide(bundled: bundled, installed: receipt(for: manifest("0.1.6-alpha.2"), source: .update), installedUsable: true), .keepInstalledNewer)
         XCTAssertEqual(InstallDecision.decide(bundled: bundled, installed: receipt(for: manifest("0.1.5-rc.2", sha: "bbbb")), installedUsable: true), .installBundled(reason: "payload_changed"))
         XCTAssertEqual(InstallDecision.decide(bundled: nil, installed: receipt(for: bundled), installedUsable: true), .reuseInstalled)
         XCTAssertEqual(InstallDecision.decide(bundled: nil, installed: nil, installedUsable: false), .noRuntime)

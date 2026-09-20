@@ -5,6 +5,20 @@ enum MenuCommand: String {
     case open, copyURL, restart, stop, start
     case toggleLaunchAtLogin, openLoginItems, toggleDock, toggleKeepPreviousRuntime
     case openLogs, openDshHome, editConfig, repair, about, quit
+    case checkForUpdates, applyUpdate, channelStable, channelPreview
+}
+
+/// Runtime update progress as the menu reports it.
+enum UpdateStatus: Equatable {
+    case idle
+    case checking
+    case downloading(String)
+    /// Downloaded and waiting for the service to go idle.
+    case staged(String)
+    case applying(String)
+    case updated(String)
+    case rolledBack(failed: String, current: String)
+    case failed
 }
 
 protocol StatusMenuDelegate: AnyObject {
@@ -20,6 +34,9 @@ struct MenuModel {
     var showsDockIcon = false
     var canRepair = false
     var keepsPreviousRuntime = true
+    var updatesEnabled = false
+    var updateChannel: UpdateChannel = .stable
+    var updateStatus: UpdateStatus = .idle
 }
 
 /// The status item and its menu, rebuilt from `MenuModel` whenever it opens or changes.
@@ -117,6 +134,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             menu.addItem(action(L10n.tr("menu.repair"), .repair, enabled: !isBusy))
         }
         menu.addItem(.separator())
+        if model.updatesEnabled {
+            addUpdateItems(to: menu)
+            menu.addItem(.separator())
+        }
         menu.addItem(action(L10n.tr("menu.about", model.appName), .about))
         menu.addItem(action(L10n.tr("menu.quit", model.appName), .quit, key: "q"))
     }
@@ -161,6 +182,43 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             menu.addItem(action(L10n.tr("menu.stop"), .stop, enabled: !isBusy))
         case .idle, .stopped, .failed, .stopping:
             menu.addItem(action(L10n.tr("menu.start"), .start, enabled: !isBusy))
+        }
+    }
+
+    private func addUpdateItems(to menu: NSMenu) {
+        if let line = updateStatusLine { menu.addItem(disabled(line)) }
+        if case .staged(let version) = model.updateStatus {
+            menu.addItem(action(L10n.tr("menu.update.applyNow", version), .applyUpdate, enabled: !isBusy))
+        }
+        let checking: Bool
+        switch model.updateStatus {
+        case .checking, .downloading, .applying: checking = true
+        case .idle, .staged, .updated, .rolledBack, .failed: checking = false
+        }
+        menu.addItem(action(L10n.tr("menu.checkForUpdates"), .checkForUpdates, enabled: !checking))
+
+        let channels = NSMenu()
+        channels.autoenablesItems = false
+        for (channel, command) in [(UpdateChannel.stable, MenuCommand.channelStable), (.preview, .channelPreview)] {
+            let item = action(L10n.tr("menu.channel.\(channel.rawValue)"), command)
+            item.state = model.updateChannel == channel ? .on : .off
+            channels.addItem(item)
+        }
+        let channelItem = NSMenuItem(title: L10n.tr("menu.updateChannel"), action: nil, keyEquivalent: "")
+        channelItem.submenu = channels
+        menu.addItem(channelItem)
+    }
+
+    private var updateStatusLine: String? {
+        switch model.updateStatus {
+        case .idle: return nil
+        case .checking: return L10n.tr("menu.update.checking")
+        case .downloading(let version): return L10n.tr("menu.update.downloading", version)
+        case .staged(let version): return L10n.tr("menu.update.staged", version)
+        case .applying(let version): return L10n.tr("menu.update.applying", version)
+        case .updated(let version): return L10n.tr("menu.update.updated", version)
+        case .rolledBack(let failed, let current): return L10n.tr("menu.update.rolledBack", failed, current)
+        case .failed: return L10n.tr("menu.update.failed")
         }
     }
 

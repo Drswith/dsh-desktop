@@ -43,6 +43,8 @@ sed \
   -e "s|@GIT_COMMIT@|$GIT_COMMIT|g" \
   -e "s|@BUILD_DATE@|$BUILD_DATE|g" \
   -e "s|@REPO_URL@|$REPO_URL|g" \
+  -e "s|@UPDATE_FEED_URL@|$UPDATE_FEED_URL|g" \
+  -e "s|@UPDATE_PUBLIC_KEY@|$UPDATE_PUBLIC_KEY|g" \
   "$ROOT/Resources/Info.plist.in" > "$CONTENTS/Info.plist"
 plutil -lint -s "$CONTENTS/Info.plist"
 

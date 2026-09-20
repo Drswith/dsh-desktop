@@ -51,9 +51,35 @@
 "dialog.repair.title" = "重新安装内置运行时？";
 "dialog.repair.body" = "服务将停止，本应用内置的运行时（DSH %@）会重新解压，然后服务重新启动。DSH 数据目录中的会话、设置和凭据不受影响。";
 "dialog.repair.action" = "重新安装";
+"dialog.repair.downgrade" = "当前使用的是更新后的 DSH %@，重新安装会退回内置的 DSH %@。新版可能已经升级了会话数据，旧版不一定能读取。";
 "dialog.launchAtLogin.title" = "需要批准";
 "dialog.launchAtLogin.approval" = "请在“系统设置 › 通用 › 登录项”中允许 %@，以便登录时启动。";
 "dialog.launchAtLogin.failed" = "无法更改“登录时启动”：%@";
+
+/* 运行时更新 */
+"menu.checkForUpdates" = "检查更新…";
+"menu.updateChannel" = "更新频道";
+"menu.channel.stable" = "稳定";
+"menu.channel.preview" = "预览";
+"menu.update.checking" = "正在检查更新…";
+"menu.update.downloading" = "正在下载 DSH %@…";
+"menu.update.staged" = "DSH %@ 已下载，空闲时自动切换";
+"menu.update.applyNow" = "立即重启服务以更新到 DSH %@";
+"menu.update.applying" = "正在切换到 DSH %@…";
+"menu.update.updated" = "已更新到 DSH %@";
+"menu.update.rolledBack" = "DSH %@ 启动失败，已退回 DSH %@";
+"menu.update.failed" = "检查更新失败，详见日志";
+"dialog.update.upToDate.title" = "DSH 已是最新版本";
+"dialog.update.upToDate.body" = "DSH %@ 是%@频道的最新版本。";
+"dialog.update.none.title" = "暂无可安装的更新";
+"dialog.update.none.body" = "当前频道暂时没有适用于本机的版本（%@）。";
+"dialog.update.staged.title" = "DSH %@ 已下载";
+"dialog.update.staged.body" = "重启服务即可切换到新版本，也可以等服务空闲时自动切换。切换后如果服务无法启动，会自动退回当前版本。";
+"dialog.update.staged.now" = "立即重启服务";
+"dialog.update.staged.later" = "空闲时再切换";
+"dialog.update.failed.title" = "无法检查更新";
+"dialog.update.external.title" = "不适用自动更新";
+"dialog.update.external.body" = "config.json 指定了自己的运行时（runtime），自动更新只管理内置运行时。";
 
 /* 关于 */
 "about.copy" = "复制";

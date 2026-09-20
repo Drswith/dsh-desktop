@@ -49,9 +49,9 @@ final class RuntimeInstallerTests: XCTestCase {
         try? FileManager.default.destinationOfSymbolicLink(atPath: runtimeRoot.appendingPathComponent(name).path)
     }
 
-    /// Everything under `runtime/` except the `current` and `previous` links.
+    /// Everything under `runtime/` except the `current`, `previous` and `pending` links.
     private func runtimeDirectories() throws -> Set<String> {
-        Set(try FileManager.default.contentsOfDirectory(atPath: runtimeRoot.path)).subtracting(["current", "previous"])
+        Set(try FileManager.default.contentsOfDirectory(atPath: runtimeRoot.path)).subtracting(["current", "previous", "pending"])
     }
 
     func testInstallsOnceThenReuses() throws {
@@ -132,6 +132,98 @@ final class RuntimeInstallerTests: XCTestCase {
         XCTAssertNil(link("previous"))
         XCTAssertEqual(link("current"), newManifest.directoryName)
         XCTAssertEqual(try runtimeDirectories(), [newManifest.directoryName])
+    }
+
+    /// Stage `payload` as a downloaded update and mark it pending.
+    @discardableResult
+    private func stagePending(_ subject: RuntimeInstaller, from payload: URL, _ manifest: RuntimeManifest) throws -> InstalledRuntime {
+        let staged = try subject.stage(archive: payload.appendingPathComponent(manifest.archive), manifest: manifest, source: .update)
+        try subject.setPending(staged)
+        return staged
+    }
+
+    func testStagedUpdateWaitsAsPendingAndSurvivesPruning() throws {
+        let (oldPayload, oldManifest) = try makePayload(dshVersion: "0.1.5-rc.2", named: "old")
+        let (newPayload, newManifest) = try makePayload(dshVersion: "0.1.6", named: "new")
+        let subject = installer(payload: oldPayload)
+        _ = try subject.ensureRuntime()
+        let staged = try stagePending(subject, from: newPayload, newManifest)
+        XCTAssertEqual(staged.receipt.source, .update)
+        XCTAssertEqual(link("current"), oldManifest.directoryName, "staging does not switch")
+        XCTAssertEqual(subject.pendingRuntime()?.receipt.dshVersion, "0.1.6")
+
+        subject.keepsPreviousRuntime = false
+        subject.applyRetention()
+        XCTAssertEqual(try runtimeDirectories(), [oldManifest.directoryName, newManifest.directoryName])
+    }
+
+    func testConfirmedSwitchKeepsTheRuntimeItReplaced() throws {
+        let (oldPayload, oldManifest) = try makePayload(dshVersion: "0.1.5-rc.2", named: "old")
+        let (newPayload, newManifest) = try makePayload(dshVersion: "0.1.6", named: "new")
+        let subject = installer(payload: oldPayload)
+        _ = try subject.ensureRuntime()
+        try stagePending(subject, from: newPayload, newManifest)
+
+        let activation = try XCTUnwrap(try subject.beginPendingActivation())
+        XCTAssertEqual(activation.dshVersion, "0.1.6")
+        XCTAssertEqual(activation.replaced, oldManifest.directoryName)
+        XCTAssertEqual(link("current"), newManifest.directoryName)
+        XCTAssertEqual(link("previous"), oldManifest.directoryName)
+        XCTAssertNil(link("pending"))
+        XCTAssertEqual(subject.currentActivation(), activation)
+        // A later launch keeps the switched-to runtime instead of reinstalling the bundled one.
+        XCTAssertEqual(try subject.ensureRuntime().receipt.dshVersion, "0.1.6")
+
+        subject.confirmActivation()
+        XCTAssertNil(subject.currentActivation())
+        XCTAssertEqual(link("previous"), oldManifest.directoryName)
+        XCTAssertEqual(try runtimeDirectories(), [newManifest.directoryName, oldManifest.directoryName])
+    }
+
+    func testConfirmedSwitchWithoutRetentionKeepsOnlyTheNewRuntime() throws {
+        let (oldPayload, _) = try makePayload(dshVersion: "0.1.5-rc.2", named: "old")
+        let (newPayload, newManifest) = try makePayload(dshVersion: "0.1.6", named: "new")
+        let subject = installer(payload: oldPayload)
+        _ = try subject.ensureRuntime()
+        try stagePending(subject, from: newPayload, newManifest)
+        subject.keepsPreviousRuntime = false
+        _ = try subject.beginPendingActivation()
+        XCTAssertNotNil(link("previous"), "the replaced runtime stays until the switch is confirmed")
+
+        subject.confirmActivation()
+        XCTAssertNil(link("previous"))
+        XCTAssertEqual(try runtimeDirectories(), [newManifest.directoryName])
+    }
+
+    func testFailedSwitchGoesBackAndRemovesTheNewRuntime() throws {
+        let (firstPayload, firstManifest) = try makePayload(dshVersion: "0.1.5-rc.1", named: "first")
+        let (secondPayload, secondManifest) = try makePayload(dshVersion: "0.1.5-rc.2", named: "second")
+        let (newPayload, newManifest) = try makePayload(dshVersion: "0.1.6", named: "new")
+        _ = try installer(payload: firstPayload).ensureRuntime()
+        let subject = installer(payload: secondPayload)
+        _ = try subject.ensureRuntime()
+        try stagePending(subject, from: newPayload, newManifest)
+        _ = try subject.beginPendingActivation()
+
+        let restored = try XCTUnwrap(subject.rollBackActivation())
+        XCTAssertEqual(restored.receipt.dshVersion, "0.1.5-rc.2")
+        XCTAssertNil(subject.currentActivation())
+        XCTAssertEqual(link("current"), secondManifest.directoryName)
+        XCTAssertEqual(link("previous"), firstManifest.directoryName, "the older kept runtime survives the failed switch")
+        XCTAssertEqual(try runtimeDirectories(), [secondManifest.directoryName, firstManifest.directoryName])
+    }
+
+    func testPendingRuntimeOlderThanTheBundledOneIsDropped() throws {
+        let (oldPayload, _) = try makePayload(dshVersion: "0.1.5-rc.2", named: "old")
+        let (pendingPayload, pendingManifest) = try makePayload(dshVersion: "0.1.6", named: "pending")
+        let (bundledPayload, _) = try makePayload(dshVersion: "0.1.7", named: "bundled")
+        _ = try installer(payload: oldPayload).ensureRuntime()
+        let subject = installer(payload: bundledPayload)
+        try stagePending(subject, from: pendingPayload, pendingManifest)
+
+        XCTAssertNil(try subject.beginPendingActivation())
+        XCTAssertNil(link("pending"))
+        XCTAssertFalse(try runtimeDirectories().contains(pendingManifest.directoryName))
     }
 
     func testRejectsTamperedArchive() throws {
