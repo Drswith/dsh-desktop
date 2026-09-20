@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Pin the runtime to one dsh version and refresh runtime/pnpm-lock.yaml with the
 # bundled pnpm:
-#   make lock                             # re-resolve the pinned version
-#   make lock DSH_VERSION=0.1.6-alpha.2   # pin any published version
+#   mise run lock                              # re-resolve the pinned version
+#   DSH_VERSION=0.1.6-alpha.2 mise run lock    # pin any published version
 # Resolutions that still satisfy the new tree are kept, as `pnpm update` would.
 source "$(dirname "$0")/config.sh"
 source "$(dirname "$0")/toolchain.sh"

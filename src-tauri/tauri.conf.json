@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DSH Launcher",
+  "version": "0.1.0",
+  "identifier": "io.github.drswith.dsh-launcher",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.icns"],
+    "category": "DeveloperTool",
+    "copyright": "© 2026 Drswith",
+    "shortDescription": "DSH 的菜单栏启动器",
+    "longDescription": "常驻菜单栏的小体积外壳：安装运行时、托管本地 dsh web 服务、看门狗和登录启动；DSH 界面在默认浏览器中打开。",
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

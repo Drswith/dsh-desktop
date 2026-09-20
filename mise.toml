@@ -1,0 +1,61 @@
+# 工具链与构建任务的唯一入口：`mise install` 装齐依赖，`mise run app` 出包。
+# 运行 `mise tasks` 看全部任务。
+
+[tools]
+# Tauri 外壳用 Rust 构建，版本固定，CI 与本机一致。
+rust = "1.89"
+
+[env]
+# 运行时 payload 里内置的 Node.js 与 pnpm 版本。它们不放进 [tools]：payload 要装的
+# 是目标架构（arm64 / x86_64）的官方 Node 二进制，由 scripts/toolchain.sh 按校验和
+# 下载后打进 runtime.aar，和本机开发用的 Node 无关。
+NODE_VERSION = "24.17.0"
+PNPM_VERSION = "11.7.0"
+
+[tasks.payload]
+description = "构建运行时 payload（Node + pnpm + dsh → runtime.aar）"
+dir = "{{config_root}}"
+run = "scripts/prepare-payload.sh"
+
+[tasks.app]
+description = "编译并组装 build/DSH Launcher.app"
+depends = ["payload"]
+dir = "{{config_root}}"
+run = "scripts/bundle-app.sh"
+
+[tasks.run]
+description = "构建并启动 App"
+depends = ["app"]
+dir = "{{config_root}}"
+run = 'open "build/${APP_NAME:-DSH Launcher}.app"'
+
+[tasks.dev]
+description = "直接跑未打包的可执行文件（不自动开浏览器）"
+dir = "{{config_root}}/src-tauri"
+run = "DSH_LAUNCHER_NO_OPEN=1 cargo run"
+
+[tasks.dmg]
+description = "生成拖拽安装的 DMG"
+depends = ["app"]
+dir = "{{config_root}}"
+run = "scripts/make-dmg.sh"
+
+[tasks.test]
+description = "单元测试 + 真实进程级集成测试"
+dir = "{{config_root}}/src-tauri"
+run = "cargo test"
+
+[tasks.lint]
+description = "格式与 clippy 检查"
+dir = "{{config_root}}/src-tauri"
+run = ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings"]
+
+[tasks.lock]
+description = "更新 runtime/ 的 dsh 锁定（DSH_VERSION=… 可指定版本）"
+dir = "{{config_root}}"
+run = "scripts/update-lock.sh"
+
+[tasks.clean]
+description = "清掉构建产物"
+dir = "{{config_root}}"
+run = "rm -rf build src-tauri/target"

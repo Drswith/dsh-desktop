@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DSH Launcher</title>
+    <link rel="stylesheet" href="status.css" />
+  </head>
+  <body>
+    <main class="card">
+      <img class="icon" src="icon.png" alt="" />
+      <div class="body">
+        <div class="heading">
+          <h1 id="title"></h1>
+          <span id="spinner" class="spinner" hidden></span>
+        </div>
+        <p id="detail"></p>
+        <div id="buttons" class="buttons" hidden>
+          <button id="logs" type="button"></button>
+          <button id="close" type="button"></button>
+          <button id="retry" type="button" class="primary"></button>
+        </div>
+      </div>
+    </main>
+    <script src="status.js"></script>
+  </body>
+</html>

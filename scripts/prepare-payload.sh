@@ -11,7 +11,7 @@ check_locked_version
 
 MANIFEST="$PAYLOAD_DIR/manifest.json"
 PROJECT_FILES=("$RUNTIME_PROJECT/package.json" "$RUNTIME_PROJECT/pnpm-workspace.yaml" "$RUNTIME_PROJECT/pnpm-lock.yaml")
-for file in "${PROJECT_FILES[@]}"; do [ -f "$file" ] || die "missing $file; run: make lock"; done
+for file in "${PROJECT_FILES[@]}"; do [ -f "$file" ] || die "missing $file; run: mise run lock"; done
 PROJECT_HASH="$(cat "${PROJECT_FILES[@]}" | shasum -a 256 | cut -c1-16)"
 # The scripts that shape the payload are inputs too, so changing them rebuilds it.
 SCRIPTS_HASH="$(cat "$0" "$(dirname "$0")/toolchain.sh" | shasum -a 256 | cut -c1-16)"
@@ -37,8 +37,8 @@ mkdir -p "$RUNTIME/app"
 cp "${PROJECT_FILES[@]}" "$RUNTIME/app/"
 log "installing @deepseek-ai/dsh@$LOCKED_DSH_VERSION from runtime/pnpm-lock.yaml with pnpm $PNPM_VERSION on Node $NODE_VERSION ($ARCH)"
 # --trust-lockfile skips pnpm's supply-chain re-check of every entry: the lock is
-# committed and was vetted when `make lock` resolved it, and the check needs a
-# service this build must not depend on. `make lock` still runs it.
+# committed and was vetted when `mise run lock` resolved it, and the check needs
+# a service this build must not depend on. `mise run lock` still runs it.
 run_pnpm "$RUNTIME" "$RUNTIME/app" "$WORK/pnpm-state" install --prod --frozen-lockfile --trust-lockfile --reporter=append-only
 # An assignment keeps the check's exit status (a `log "$(…)"` would mask it).
 platform_report="$(check_platform_packages "$RUNTIME" "$RUNTIME/app")" || die "the install is incomplete; rerun to retry the downloads"

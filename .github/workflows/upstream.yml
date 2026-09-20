@@ -59,16 +59,19 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     env:
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
       DSH_VERSION: ${{ needs.check.outputs.version }}
       LOCKED: ${{ needs.check.outputs.locked }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
 
+      - uses: jdx/mise-action@v4
+
       - uses: actions/cache@v6
         with:
           path: .cache
-          key: runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime/pnpm-lock.yaml', 'scripts/config.sh') }}
+          key: runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime/pnpm-lock.yaml', 'scripts/config.sh', 'mise.toml') }}
           restore-keys: |
             runtime-${{ runner.os }}-${{ runner.arch }}-
 
@@ -76,11 +79,11 @@ jobs:
       # the job's time (pnpm's supply-chain policy service has hung before).
       - name: Lock the new version
         timeout-minutes: 15
-        run: make lock
+        run: mise run lock
 
       - name: Install the runtime and boot it once
         timeout-minutes: 25
-        run: scripts/prepare-payload.sh
+        run: mise run payload
 
       - name: Open the issue and the pull request
         run: |

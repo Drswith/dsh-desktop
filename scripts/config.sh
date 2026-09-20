@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared build settings, sourced by the other scripts. Every value can be
-# overridden from the environment, e.g. `ARCH=x86_64 make app`.
+# overridden from the environment, e.g. `ARCH=x86_64 mise run app`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +16,8 @@ log() {
 
 # --- App identity (kept distinct from the official Electron "DSH Desktop") ---
 APP_NAME="${APP_NAME:-DSH Launcher}"
-EXECUTABLE_NAME="DSHLauncher"
+# The Cargo binary name; it lands at Contents/MacOS/<EXECUTABLE_NAME>.
+EXECUTABLE_NAME="dsh-launcher"
 BUNDLE_ID="${BUNDLE_ID:-io.github.drswith.dsh-launcher}"
 # Version label: a release tag passes it explicitly (0.2.0, 0.2.0-beta.1); other
 # builds describe the nearest v* tag (0.2.0-3-gabc1234), or 0.1.0 before the first.
@@ -75,27 +76,33 @@ BUILD_DATE="${BUILD_DATE:-$(date +%Y-%m-%dT%H:%M:%S%z | sed -E 's/([+-][0-9]{2})
 # --- Target architecture: the payload carries native modules, so one app per arch ---
 ARCH="${ARCH:-$(uname -m)}"
 case "$ARCH" in
-  arm64) NODE_ARCH=arm64 ;;
-  x86_64) NODE_ARCH=x64 ;;
+  arm64) NODE_ARCH=arm64; RUST_TARGET=aarch64-apple-darwin ;;
+  x86_64) NODE_ARCH=x64; RUST_TARGET=x86_64-apple-darwin ;;
   *) die "unsupported ARCH=$ARCH (use arm64 or x86_64)" ;;
 esac
 
 # --- Runtime versions ---
-# Node and pnpm are pinned here: the official desktop stopped shipping a Node of its
-# own (it runs dsh on Electron's), so there is no upstream version to follow. dsh
-# asks for node ^22.19.0 || >=24.0.0; the payload smoke test proves the pair works.
-NODE_VERSION="${NODE_VERSION:-24.17.0}"
-PNPM_VERSION="${PNPM_VERSION:-11.7.0}"
+# Node and pnpm are pinned in mise.toml, the single place the whole project reads
+# its dependency versions from; mise exports them, and this reads the file when a
+# script runs outside mise. The official desktop stopped shipping a Node of its own
+# (it runs dsh on Electron's), so there is no upstream version to follow. dsh asks
+# for node ^22.19.0 || >=24.0.0; the payload smoke test proves the pair works.
+mise_env() {
+  sed -n "s/^$1 = \"\(.*\)\"\$/\1/p" "$ROOT/mise.toml" | head -1
+}
+NODE_VERSION="${NODE_VERSION:-$(mise_env NODE_VERSION)}"
+PNPM_VERSION="${PNPM_VERSION:-$(mise_env PNPM_VERSION)}"
+[ -n "$NODE_VERSION" ] && [ -n "$PNPM_VERSION" ] || die "mise.toml does not pin NODE_VERSION and PNPM_VERSION"
 # pnpm's per-request timeout. The default keeps a stalled request (its supply-chain
 # policy check, say) from hanging the build; raise it on a slow link when a single
-# package is too large to arrive in time, e.g. PNPM_FETCH_TIMEOUT=600000 make lock.
+# package is too large to arrive in time, e.g. PNPM_FETCH_TIMEOUT=600000 mise run lock.
 PNPM_FETCH_TIMEOUT="${PNPM_FETCH_TIMEOUT:-60000}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_REGISTRY="${NPM_REGISTRY%/}/"
 NODE_DIST_URL="${NODE_DIST_URL:-https://nodejs.org/download/release}"
 
 # --- Runtime project: the committed package.json + pnpm-lock.yaml decide which dsh
-# is installed. DSH_VERSION names the version a build expects; `make lock` uses it to
+# is installed. DSH_VERSION names the version a build expects; `mise run lock` uses it to
 # pin another one, and without it the locked version is what everything follows.
 RUNTIME_PROJECT="${RUNTIME_PROJECT:-$ROOT/runtime}"
 locked_dsh_version() {
@@ -107,7 +114,7 @@ DSH_VERSION="${DSH_VERSION:-$LOCKED_DSH_VERSION}"
 # Refuse to build when the lock pins another dsh than the one expected.
 check_locked_version() {
   [ -n "$LOCKED_DSH_VERSION" ] || die "$RUNTIME_PROJECT/package.json does not pin @deepseek-ai/dsh"
-  [ "$LOCKED_DSH_VERSION" = "$DSH_VERSION" ] || die "runtime/package.json locks dsh $LOCKED_DSH_VERSION but the build expects $DSH_VERSION; run: make lock DSH_VERSION=$DSH_VERSION"
+  [ "$LOCKED_DSH_VERSION" = "$DSH_VERSION" ] || die "runtime/package.json locks dsh $LOCKED_DSH_VERSION but the build expects $DSH_VERSION; run: DSH_VERSION=$DSH_VERSION mise run lock"
 }
 
 # --- Locations ---
