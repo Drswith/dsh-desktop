@@ -4,23 +4,29 @@
   "version": "0.1.0",
   "identifier": "io.github.drswith.dsh-launcher",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../src"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+      "csp": null
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
-    "icon": ["icons/icon.icns"],
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "category": "DeveloperTool",
     "copyright": "© 2026 Drswith",
     "shortDescription": "DSH 的菜单栏启动器",
-    "longDescription": "常驻菜单栏的小体积外壳：安装运行时、托管本地 dsh web 服务、看门狗和登录启动；DSH 界面在默认浏览器中打开。",
+    "longDescription": "常驻托盘的小外壳：启动本地 dsh web 服务，就绪后从菜单里在默认浏览器打开它。",
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

@@ -1,13 +1,9 @@
 name: CI
 
-# Pushes and pull requests test and build both architectures. Two things publish a
-# release: a pushed v* tag, and a push to main that changes the locked dsh version
-# (the merge of an upstream bump), which takes the next patch version by itself.
-# A manual run keeps the disk images as artifacts, to try a build before releasing.
+# 只做“能编译、测试过”这两件事，不出安装包、不发版——那些等真的要分发了再加。
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -15,140 +11,73 @@ permissions:
   contents: read
 
 concurrency:
-  # Keyed on the event too, so a manual run never cancels the push run of the same commit.
-  group: ci-${{ github.event_name }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  plan:
-    name: Decide the version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.plan.outputs.version }}
-      release: ${{ steps.plan.outputs.release }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - id: plan
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          version=""
-          release=false
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            # The tag names the version, even when another tag marks the same commit.
-            version="${GITHUB_REF_NAME#v}"
-            release=true
-          elif [ "$GITHUB_EVENT_NAME" = push ] && git rev-parse --verify --quiet "$BEFORE" > /dev/null \
-            && git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -qx 'runtime/pnpm-lock.yaml'; then
-            latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)"
-            if [ -z "$latest" ]; then
-              echo "::notice::the locked dsh changed, but there is no v* tag yet; publish the first release by hand"
-            else
-              core="${latest#v}"
-              version="$(echo "${core%%-*}" | awk -F. '{ printf "%d.%d.%d", $1, $2, $3 + 1 }')"
-              release=true
-              echo "::notice::the locked dsh changed; releasing $version after $latest"
-            fi
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "release=$release" >> "$GITHUB_OUTPUT"
-
-  build:
-    name: Test and build (macOS ${{ matrix.arch }})
-    needs: plan
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-26
-          - arch: x86_64
-            runner: macos-26-intel
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+  test:
+    name: 测试 + lint（macOS，唯一实际跑过的平台）
+    runs-on: macos-26
+    timeout-minutes: 30
     env:
       MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
-      ARCH: ${{ matrix.arch }}
-      # Empty for ordinary runs, where config.sh describes the nearest v* tag.
-      APP_VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-        with:
-          # Full history: the version describes the nearest v* tag, and the
-          # build number counts commits.
-          fetch-depth: 0
 
-      # The toolchain mise.toml pins, cached by the action itself.
       - uses: jdx/mise-action@v4
 
-      # Node.js and pnpm downloads plus the pnpm store; keyed on everything that
-      # decides what the runtime installs.
-      - uses: actions/cache@v6
-        with:
-          path: .cache
-          key: runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime/pnpm-lock.yaml', 'scripts/config.sh', 'mise.toml') }}
-          restore-keys: |
-            runtime-${{ runner.os }}-${{ runner.arch }}-
-
-      # Crate downloads and build output for the Rust shell.
       - uses: actions/cache@v6
         with:
           path: |
             ~/.local/share/mise/cargo/registry
             ~/.local/share/mise/cargo/git
             src-tauri/target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock', 'mise.toml') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock', 'mise.toml') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ runner.os }}-
 
-      - name: Format and clippy
-        run: mise run lint
+      - run: mise run lint
+      - run: mise run test
 
-      - name: Unit and integration tests
-        run: mise run test
-
-      - name: Build the app and the disk image
-        run: mise run dmg
-
-      - if: needs.plan.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v7
-        with:
-          name: dmg-${{ matrix.arch }}
-          path: build/*.dmg
-          if-no-files-found: error
-          retention-days: 7
-
-  release:
-    name: Publish the GitHub release
-    needs: [plan, build]
-    if: needs.plan.outputs.release == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  compile-check:
+    name: 跨平台编译检查（${{ matrix.name }}）
+    # 只确认三个平台都能编译通过，不产出安装包、也没有在这些平台上点击验证过。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            name: macOS
+          - os: windows-2025
+            name: Windows
+          - os: ubuntu-24.04
+            name: Linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: dmg-*
-          path: dist
-          merge-multiple: true
+      - uses: jdx/mise-action@v4
 
-      - name: Create the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.plan.outputs.version }}
+      - name: 装 Linux 的 WebView / 托盘依赖
+        if: runner.os == 'Linux'
         run: |
-          dsh="$(sed -n 's/^    "@deepseek-ai\/dsh": "\(.*\)"$/\1/p' runtime/package.json)"
-          (cd dist && shasum -a 256 *.dmg > SHA256SUMS.txt)
-          sed -e "s/{{VERSION}}/$VERSION/g" -e "s/{{DSH_VERSION}}/$dsh/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
-          # A suffixed version such as 0.2.0-beta.1 is a prerelease.
-          prerelease=()
-          if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
-          # --target creates the tag for a release published from main; for a tag
-          # push the tag is already there and the target is the same commit.
-          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "DSH Launcher $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${prerelease[@]}"
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/share/mise/cargo/registry
+            ~/.local/share/mise/cargo/git
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock', 'mise.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets --locked

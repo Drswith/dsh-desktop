@@ -1,14 +1,16 @@
 [package]
 name = "dsh-launcher"
-version = "0.0.0"
-description = "DSH 的菜单栏启动器：安装运行时、托管本地 dsh web 服务"
+version = "0.1.0"
+description = "DSH 的菜单栏启动器：启动本地 dsh web 服务，托盘里打开浏览器"
 authors = ["Drswith"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.82"
 
 [lib]
-name = "dsh_launcher"
+# `_lib` 后缀看着多余，但 Windows 上 lib 和 bin 用同一个名字会冲突
+# （cargo 的已知问题：https://github.com/rust-lang/cargo/issues/8519）。
+name = "dsh_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 path = "src/lib.rs"
 
 [[bin]]
@@ -19,52 +21,12 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# tray-icon：托盘图标/菜单；image-png：内置的 PNG 托盘图标要在运行时解码。
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-libc = "0.2"
+tauri-plugin-opener = "2"
+# 只用来解析 `dsh web` 就绪行里的地址（core:default 权限不需要它，纯 Rust 内部用）。
 url = "2"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = [
-  "objc2-core-services",
-  "NSAppleEventDescriptor",
-  "NSAppleEventManager",
-  "NSArray",
-  "NSDictionary",
-  "NSEnumerator",
-  "NSLocale",
-  "NSNotification",
-  "NSObjCRuntime",
-  "NSOperation",
-  "NSString",
-  "NSURL",
-  "NSUserDefaults",
-  "NSValue",
-] }
-objc2-app-kit = { version = "0.3", features = [
-  "NSAlert",
-  "NSApplication",
-  "NSButton",
-  "NSCell",
-  "NSControl",
-  "NSGraphics",
-  "NSImage",
-  "NSMenu",
-  "NSMenuItem",
-  "NSPasteboard",
-  "NSResponder",
-  "NSRunningApplication",
-  "NSView",
-  "NSWindow",
-  "NSWorkspace",
-] }
-objc2-service-management = { version = "0.3", features = ["SMAppService"] }
-block2 = "0.6"
-muda = "0.19"
 
 [profile.release]
 codegen-units = 1

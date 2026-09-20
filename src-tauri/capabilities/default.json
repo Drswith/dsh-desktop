@@ -1,11 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The status window listens for state updates and calls back into the shell.",
-  "windows": ["status"],
-  "permissions": [
-    "core:event:default",
-    "core:window:allow-close",
-    "core:window:allow-set-size"
-  ]
+  "description": "预留给以后加窗口用；托盘菜单和打开浏览器都是纯 Rust 调用，不走这层权限。",
+  "windows": [],
+  "permissions": ["core:default"]
 }

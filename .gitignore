@@ -1,9 +1,6 @@
-# DSH Launcher build outputs and download caches
-/build/
-/.cache/
+# 依赖与构建产物
+/node_modules/
 /src-tauri/target/
 /src-tauri/gen/
-/src-tauri/icons/icon.icns
-*.dmg
+
 .DS_Store
-/signing.local.env
