@@ -76,7 +76,12 @@ run_pnpm() {
     proxy_config+=("--config.noproxy=$no_proxy_value")
   fi
   mkdir -p "$state/config"
-  : > "$state/config/npmrc"
+  # Numbers belong in the config file: --config.<key> passes the raw string through,
+  # and pnpm then hands "60000" to APIs that want a number.
+  cat > "$state/config/npmrc" <<EOF
+fetch-retries=5
+fetch-timeout=$PNPM_FETCH_TIMEOUT
+EOF
   (
     cd "$project"
     env -i \
@@ -95,8 +100,6 @@ run_pnpm() {
         --config.userconfig="$state/config/npmrc" \
         --config.package-import-method=clone-or-copy \
         --config.update-notifier=false \
-        --config.fetch-retries=5 \
-        --config.fetch-timeout="$PNPM_FETCH_TIMEOUT" \
         ${proxy_config[@]+"${proxy_config[@]}"} \
         "$@"
   )
