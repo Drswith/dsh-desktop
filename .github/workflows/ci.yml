@@ -1,8 +1,9 @@
 name: CI
 
-# Pushes and pull requests test and build both architectures. A pushed v* tag
-# also publishes the disk images as a GitHub release; a manual run keeps them
-# as artifacts, to try a build before releasing it.
+# Pushes and pull requests test and build both architectures. Two things publish a
+# release: a pushed v* tag, and a push to main that changes the locked dsh version
+# (the merge of an upstream bump), which takes the next patch version by itself.
+# A manual run keeps the disk images as artifacts, to try a build before releasing.
 on:
   push:
     branches: [main]
@@ -19,8 +20,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Decide the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: plan
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          version=""
+          release=false
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # The tag names the version, even when another tag marks the same commit.
+            version="${GITHUB_REF_NAME#v}"
+            release=true
+          elif [ "$GITHUB_EVENT_NAME" = push ] && git rev-parse --verify --quiet "$BEFORE" > /dev/null \
+            && git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -qx 'runtime/pnpm-lock.yaml'; then
+            latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)"
+            if [ -z "$latest" ]; then
+              echo "::notice::the locked dsh changed, but there is no v* tag yet; publish the first release by hand"
+            else
+              core="${latest#v}"
+              version="$(echo "${core%%-*}" | awk -F. '{ printf "%d.%d.%d", $1, $2, $3 + 1 }')"
+              release=true
+              echo "::notice::the locked dsh changed; releasing $version after $latest"
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
   build:
     name: Test and build (macOS ${{ matrix.arch }})
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +71,8 @@ jobs:
     timeout-minutes: 60
     env:
       ARCH: ${{ matrix.arch }}
+      # Empty for ordinary runs, where config.sh describes the nearest v* tag.
+      APP_VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,12 +94,10 @@ jobs:
 
       - name: Build the app and the disk image
         run: |
-          # A tag build takes its version from that tag, even when another tag marks the same commit.
-          if [ "$GITHUB_REF_TYPE" = tag ]; then export APP_VERSION="${GITHUB_REF_NAME#v}"; fi
           make app
           scripts/make-dmg.sh
 
-      - if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+      - if: needs.plan.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: dmg-${{ matrix.arch }}
@@ -69,8 +107,8 @@ jobs:
 
   release:
     name: Publish the GitHub release
-    needs: build
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [plan, build]
+    if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -86,13 +124,15 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
           dsh="$(sed -n 's/^    "@deepseek-ai\/dsh": "\(.*\)"$/\1/p' runtime/package.json)"
           (cd dist && shasum -a 256 *.dmg > SHA256SUMS.txt)
-          sed -e "s/{{VERSION}}/$version/g" -e "s/{{DSH_VERSION}}/$dsh/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
-          # A suffixed tag such as v0.2.0-beta.1 is a prerelease.
+          sed -e "s/{{VERSION}}/$VERSION/g" -e "s/{{DSH_VERSION}}/$dsh/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
+          # A suffixed version such as 0.2.0-beta.1 is a prerelease.
           prerelease=()
-          if [[ "$version" == *-* ]]; then prerelease=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" dist/* --title "DSH Launcher $version" \
+          if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
+          # --target creates the tag for a release published from main; for a tag
+          # push the tag is already there and the target is the same commit.
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "DSH Launcher $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${prerelease[@]}"

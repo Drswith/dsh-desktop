@@ -78,6 +78,16 @@ git tag v0.2.0 && git push origin v0.2.0
 
 两个架构都构建成功后，CI 生成 `SHA256SUMS.txt` 并创建 GitHub Release，发布说明由[安装说明模板](.github/release-notes.md)加上按提交自动生成的更新内容组成。`v0.2.0-beta.1` 这类带后缀的 tag 发布为预发布版本。发布失败要重跑时，先删掉已创建的 Release（保留 tag）。dsh 随 App 一起发版，不单独热更新运行时。
 
+升级 dsh 的 PR 合并后也会发版：推到 `main` 的提交改动了 `runtime/pnpm-lock.yaml` 时，CI 取最近 `v*` tag 的补丁号加一作为版本号，直接创建 Release，tag 由这次发布顺带创建。仓库还没有任何 tag 时不会自动发版，第一个正式版本要手动打 tag。
+
+### 跟进上游 dsh
+
+[上游跟进工作流](.github/workflows/upstream.yml)每天查一次 npm 上的 `latest`。比 `runtime/package.json` 锁定的版本新时，先在 CI 上 `make lock`，按新锁文件装好运行时并真实启动一次 dsh；通过后才推分支 `chore/dsh-<版本>`、开一个 issue，并提交关联它的 PR（合并即关闭该 issue）。PR 里写明锁文件的依赖数量、dsh 要求的 Node 版本与仓库固定版本的对比，以及冒烟启动的结果。
+
+同一个版本已经有分支时不会重复提。想试预览版（npm 的 `alpha`），在 Actions 页面手动运行这个工作流并填入版本号即可。
+
+用内置令牌开的 PR 不会触发 PR 的 CI，这是 GitHub 防止递归触发的机制，所以验证放在开 PR 之前做；合并到 `main` 之后，主分支 CI 照常运行。
+
 ### 签名
 
 只签外层 `DSH Launcher.app`：签 Swift 可执行文件，并把包里其余文件（包括 `payload/runtime.aar`）的哈希封存进签名。运行时里的 Node 和原生模块不重新签名：
