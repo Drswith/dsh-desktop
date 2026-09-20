@@ -4,7 +4,7 @@
 
 DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳负责安装运行时、托管本地 `dsh web` 服务、看门狗和登录启动；DSH 界面仍是 dsh 自带的 Web UI，在默认浏览器中打开。
 
-> 基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`deepseek-harness/` 子模块）构建，非 DeepSeek 官方产品。
+> 运行 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（npm 上的 `@deepseek-ai/dsh`），非 DeepSeek 官方产品。
 
 ## 为什么是这种形态
 
@@ -34,7 +34,6 @@ DSH 的原生 macOS 启动器：常驻菜单栏的 Swift/AppKit 小体积外壳�
 前置：Xcode（Swift 6）、网络（首次下载 Node.js、pnpm 与 npm 包；设置了 `HTTP(S)_PROXY` / `NO_PROXY` 时，curl 下载与 pnpm 安装都会走代理）。
 
 ```bash
-git submodule update --init   # 版本来源
 make lock                     # 仅在升级 dsh 时需要：更新 runtime/ 的锁定
 make app                      # payload + 编译 + 组装并签名 build/DSH Launcher.app
 make run                      # 构建并启动
@@ -42,7 +41,7 @@ make test                     # 单元测试 + 真实进程级集成测试
 make dmg                      # 生成拖拽安装的 DMG
 ```
 
-Node.js 与 pnpm 的版本取自子模块：Node.js 用官方桌面端 `prepare-runtime.ts` 固定的版本，pnpm 用根 `package.json` 的 `packageManager`。
+Node.js 与 pnpm 的版本固定在 `scripts/config.sh`：官方桌面端已经不再单独打包 Node（它让 dsh 跑在 Electron 自带的 Node 上），没有可跟随的上游版本。dsh 要求 `node ^22.19.0 || >=24.0.0`，构建末尾的冒烟启动验证这个组合能用。
 
 dsh 及其全部依赖由仓库里的运行时项目锁定：
 
@@ -52,13 +51,9 @@ dsh 及其全部依赖由仓库里的运行时项目锁定：
 | `runtime/pnpm-workspace.yaml` | 安装设置（平铺安装、自动补齐 peer 依赖、允许运行安装脚本的包） |
 | `runtime/pnpm-lock.yaml` | 每个包的确切版本与完整性哈希 |
 
-构建时用 `pnpm install --frozen-lockfile` 安装，同一份锁文件每次装出相同的依赖；锁文件与 `package.json` 不一致时安装失败。构建还会检查锁定的 dsh 版本等于子模块 `apps/cli/package.json` 的版本（或显式的 `DSH_VERSION`），不一致就报错并提示运行 `make lock`。锁文件包含各平台的可选依赖条目，arm64 与 Intel 构建共用一份。
+构建时用 `pnpm install --frozen-lockfile` 安装，同一份锁文件每次装出相同的依赖；锁文件与 `package.json` 不一致时安装失败。`runtime/package.json` 锁定的版本就是构建的 dsh 版本，显式传入的 `DSH_VERSION` 与它不一致时直接报错并提示运行 `make lock`。锁文件包含各平台的可选依赖条目，arm64 与 Intel 构建共用一份。
 
-升级 dsh：更新子模块后运行 `make lock`，提交 `runtime/` 的改动。`make lock` 只改 dsh 的版本号，仍然满足依赖范围的其他包保持原版本。要打包子模块以外的版本，两条命令都带上版本：
-
-```bash
-make lock DSH_VERSION=0.1.6-alpha.2 && make app DSH_VERSION=0.1.6-alpha.2
-```
+升级 dsh：`make lock DSH_VERSION=<版本>` 换版本，提交 `runtime/` 的改动即可。`make lock` 只改 dsh 的版本号，仍然满足依赖范围的其他包保持原版本；不带版本时是按当前锁定的版本重新解析。
 
 其他可覆盖的设置：
 

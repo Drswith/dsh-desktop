@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Pin the runtime to one dsh version and refresh runtime/pnpm-lock.yaml with the
 # bundled pnpm:
-#   make lock                             # the deepseek-harness submodule's version
-#   make lock DSH_VERSION=0.1.6-alpha.2   # any published version
+#   make lock                             # re-resolve the pinned version
+#   make lock DSH_VERSION=0.1.6-alpha.2   # pin any published version
 # Resolutions that still satisfy the new tree are kept, as `pnpm update` would.
 source "$(dirname "$0")/config.sh"
 source "$(dirname "$0")/toolchain.sh"
 
-[ -n "$DSH_VERSION" ] || die "DSH_VERSION is empty (init the deepseek-harness submodule or set DSH_VERSION)"
+[ -n "$DSH_VERSION" ] || die "DSH_VERSION is empty and runtime/package.json pins no dsh"
 for file in package.json pnpm-workspace.yaml; do
   [ -f "$RUNTIME_PROJECT/$file" ] || die "missing $RUNTIME_PROJECT/$file"
 done

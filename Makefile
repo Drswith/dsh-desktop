@@ -8,7 +8,7 @@ export
 
 all: app
 
-# Pin the runtime to the submodule's dsh version (or DSH_VERSION=…) and refresh runtime/pnpm-lock.yaml.
+# Re-resolve the pinned dsh version (or pin DSH_VERSION=…) and refresh runtime/pnpm-lock.yaml.
 lock:
 	@scripts/update-lock.sh
 

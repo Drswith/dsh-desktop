@@ -36,7 +36,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: true
           # Full history: the version describes the nearest v* tag, and the
           # build number counts commits.
           fetch-depth: 0
@@ -46,7 +45,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .cache
-          key: runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime/pnpm-lock.yaml', 'deepseek-harness/package.json', 'deepseek-harness/apps/desktop/scripts/prepare-runtime.ts') }}
+          key: runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime/pnpm-lock.yaml', 'scripts/config.sh') }}
           restore-keys: |
             runtime-${{ runner.os }}-${{ runner.arch }}-
 

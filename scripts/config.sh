@@ -4,7 +4,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HARNESS="$ROOT/deepseek-harness"
 
 die() {
   echo "error: $*" >&2
@@ -51,7 +50,7 @@ BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null
 git_commit() {
   local hash
   hash="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" || { echo unknown; return; }
-  if [ -n "$(git -C "$ROOT" status --porcelain --ignore-submodules=dirty 2>/dev/null)" ]; then
+  if [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
     hash="$hash-dirty"
   fi
   echo "$hash"
@@ -81,21 +80,11 @@ case "$ARCH" in
   *) die "unsupported ARCH=$ARCH (use arm64 or x86_64)" ;;
 esac
 
-# --- Runtime versions: default to what the deepseek-harness submodule pins ---
-submodule_dsh_version() {
-  sed -n 's/^  "version": "\(.*\)",$/\1/p' "$HARNESS/apps/cli/package.json" 2>/dev/null | head -1
-}
-submodule_node_version() {
-  sed -n "s/^const NODE_VERSION = '\(.*\)'$/\1/p" "$HARNESS/apps/desktop/scripts/prepare-runtime.ts" 2>/dev/null | head -1
-}
-submodule_pnpm_version() {
-  sed -n 's/^  "packageManager": "pnpm@\([^"+]*\).*",$/\1/p' "$HARNESS/package.json" 2>/dev/null | head -1
-}
-
-DSH_VERSION="${DSH_VERSION:-$(submodule_dsh_version)}"
-NODE_VERSION="${NODE_VERSION:-$(submodule_node_version)}"
+# --- Runtime versions ---
+# Node and pnpm are pinned here: the official desktop stopped shipping a Node of its
+# own (it runs dsh on Electron's), so there is no upstream version to follow. dsh
+# asks for node ^22.19.0 || >=24.0.0; the payload smoke test proves the pair works.
 NODE_VERSION="${NODE_VERSION:-24.17.0}"
-PNPM_VERSION="${PNPM_VERSION:-$(submodule_pnpm_version)}"
 PNPM_VERSION="${PNPM_VERSION:-11.7.0}"
 # pnpm's per-request timeout. The default keeps a stalled request (its supply-chain
 # policy check, say) from hanging the build; raise it on a slow link when a single
@@ -105,18 +94,18 @@ NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_REGISTRY="${NPM_REGISTRY%/}/"
 NODE_DIST_URL="${NODE_DIST_URL:-https://nodejs.org/download/release}"
 
-# --- Runtime project: the committed package.json + pnpm-lock.yaml decide what is
-# installed. DSH_VERSION above is only what the build expects (the submodule's
-# version unless overridden), and the two must agree.
+# --- Runtime project: the committed package.json + pnpm-lock.yaml decide which dsh
+# is installed. DSH_VERSION names the version a build expects; `make lock` uses it to
+# pin another one, and without it the locked version is what everything follows.
 RUNTIME_PROJECT="${RUNTIME_PROJECT:-$ROOT/runtime}"
 locked_dsh_version() {
   sed -n 's/^    "@deepseek-ai\/dsh": "\(.*\)"$/\1/p' "$RUNTIME_PROJECT/package.json" 2>/dev/null | head -1
 }
 LOCKED_DSH_VERSION="$(locked_dsh_version)"
+DSH_VERSION="${DSH_VERSION:-$LOCKED_DSH_VERSION}"
 
 # Refuse to build when the lock pins another dsh than the one expected.
 check_locked_version() {
-  [ -n "$DSH_VERSION" ] || die "DSH_VERSION is empty (init the deepseek-harness submodule or set DSH_VERSION)"
   [ -n "$LOCKED_DSH_VERSION" ] || die "$RUNTIME_PROJECT/package.json does not pin @deepseek-ai/dsh"
   [ "$LOCKED_DSH_VERSION" = "$DSH_VERSION" ] || die "runtime/package.json locks dsh $LOCKED_DSH_VERSION but the build expects $DSH_VERSION; run: make lock DSH_VERSION=$DSH_VERSION"
 }
