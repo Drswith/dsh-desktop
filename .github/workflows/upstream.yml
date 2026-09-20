@@ -72,10 +72,14 @@ jobs:
           restore-keys: |
             runtime-${{ runner.os }}-${{ runner.arch }}-
 
+      # Both steps reach the network; a stalled one fails here instead of burning
+      # the job's time (pnpm's supply-chain policy service has hung before).
       - name: Lock the new version
+        timeout-minutes: 15
         run: make lock
 
       - name: Install the runtime and boot it once
+        timeout-minutes: 25
         run: scripts/prepare-payload.sh
 
       - name: Open the issue and the pull request
