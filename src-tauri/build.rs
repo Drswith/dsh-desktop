@@ -1,6 +1,14 @@
 use std::process::Command;
 
 fn main() {
+    // 测试包和正式包共用源码，但要在编译期选择不同的托盘资源。显式声明
+    // rerun-if-env-changed，确保在两种构建之间切换时 Cargo 不复用错误的产物。
+    println!("cargo:rerun-if-env-changed=DSH_LAUNCHER_TEST_BUILD");
+    println!("cargo:rustc-check-cfg=cfg(dsh_launcher_test_build)");
+    if std::env::var_os("DSH_LAUNCHER_TEST_BUILD").is_some() {
+        println!("cargo:rustc-cfg=dsh_launcher_test_build");
+    }
+
     // Build identity the bundle task supplies; each one has a development default
     // so `cargo run` and `cargo test` work without the task.
     for (key, fallback) in [

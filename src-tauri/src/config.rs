@@ -10,6 +10,27 @@ use serde::{Deserialize, Serialize};
 const SHIPPED_PROFILES: &[&str] = &["acp", "web", "headless", "sdk", "sdk-minimal"];
 const DEFAULT_RUNNER_COMMAND: &str = "pnpm";
 const DEFAULT_DSH_PACKAGE: &str = "@deepseek-ai/dsh@0.1.5-rc.2";
+const PRODUCTION_DATA_DIR_NAME: &str = ".dsh-launcher";
+const DEVELOPMENT_DATA_DIR_NAME: &str = ".dsh-launcher-dev";
+const DATA_DIR_ENV: &str = "DSH_LAUNCHER_DATA_DIR";
+const CONFIG_KEY_ORDER: &[&str] = &[
+    "_comment",
+    "_comment_port",
+    "_comment_profile",
+    "_comment_dshHome",
+    "_comment_extraArgs",
+    "_comment_environment",
+    "_comment_runner",
+    "port",
+    "profile",
+    "dshHome",
+    "extraArgs",
+    "environment",
+    "runner",
+    "_comment_runtime",
+    "runtime",
+];
+const RUNNER_KEY_ORDER: &[&str] = &["command", "package", "allowBuild", "allowBuildFor"];
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -194,6 +215,7 @@ impl ShellConfig {
             .as_object_mut()
             .ok_or_else(|| "配置根节点必须是 JSON 对象。".to_owned())?
             .insert("runner".to_owned(), runner_value);
+        reorder_config_document(&mut document);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("创建配置目录失败：{error}"))?;
         }
@@ -383,6 +405,7 @@ fn login_environment() -> BTreeMap<String, String> {
 
 #[derive(Clone, Debug)]
 pub struct AppPaths {
+    pub root: PathBuf,
     pub config: PathBuf,
     pub logs: PathBuf,
     pub preferences: PathBuf,
@@ -390,13 +413,62 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn new(home: PathBuf) -> Self {
-        let root = home.join(".dsh-launcher");
+        let root = data_root(&home);
         Self {
+            root: root.clone(),
             config: root.join("config.json"),
             logs: root.join("logs"),
             preferences: root.join("preferences.json"),
         }
     }
+}
+
+fn data_root(home: &Path) -> PathBuf {
+    if let Some(raw) = std::env::var_os(DATA_DIR_ENV) {
+        let path = PathBuf::from(raw);
+        if !path.as_os_str().is_empty() {
+            return if path.is_absolute() { path } else { home.join(path) };
+        }
+    }
+
+    let name = if cfg!(debug_assertions) {
+        DEVELOPMENT_DATA_DIR_NAME
+    } else {
+        PRODUCTION_DATA_DIR_NAME
+    };
+    home.join(name)
+}
+
+fn reorder_config_document(document: &mut serde_json::Value) {
+    let Some(object) = document.as_object_mut() else {
+        return;
+    };
+
+    if let Some(runner) = object
+        .get_mut("runner")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        reorder_object(runner, RUNNER_KEY_ORDER);
+    }
+    reorder_object(object, CONFIG_KEY_ORDER);
+}
+
+fn reorder_object(object: &mut serde_json::Map<String, serde_json::Value>, order: &[&str]) {
+    let original = std::mem::take(object);
+    let mut reordered = serde_json::Map::new();
+
+    for key in order {
+        if let Some(value) = original.get(*key).cloned() {
+            reordered.insert((*key).to_owned(), value);
+        }
+    }
+    for (key, value) in original {
+        if !order.iter().any(|known| *known == key) {
+            reordered.insert(key, value);
+        }
+    }
+
+    *object = reordered;
 }
 
 #[cfg(test)]
@@ -579,5 +651,43 @@ mod tests {
         );
         assert!(!loaded.needs_build_preflight());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persists_config_in_documented_key_order() {
+        let path = std::env::temp_dir().join(format!(
+            "dsh-launcher-order-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_file(&path);
+        fs::write(
+            &path,
+            r#"{"runtime":null,"profile":"launcher","runner":{"allowBuildFor":null,"package":"@deepseek-ai/dsh@0.1.5-rc.2","allowBuild":[],"command":"pnpm"},"port":31080}"#,
+        )
+        .unwrap();
+
+        let mut config = ShellConfig::default();
+        config
+            .persist_build_approval(&path, "@deepseek-ai/dsh@0.1.5-rc.2", &["node-pty".to_owned()])
+            .unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.find("\"port\"").unwrap() < saved.find("\"profile\"").unwrap());
+        assert!(saved.find("\"profile\"").unwrap() < saved.find("\"runner\"").unwrap());
+        assert!(saved.find("\"command\"").unwrap() < saved.find("\"package\"").unwrap());
+        assert!(saved.find("\"package\"").unwrap() < saved.find("\"allowBuild\"").unwrap());
+        assert!(saved.find("\"allowBuild\"").unwrap() < saved.find("\"allowBuildFor\"").unwrap());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn uses_development_data_directory_for_debug_builds() {
+        let paths = AppPaths::new(PathBuf::from("/tmp/dsh-launcher-home"));
+        let expected = if cfg!(debug_assertions) {
+            "/tmp/dsh-launcher-home/.dsh-launcher-dev"
+        } else {
+            "/tmp/dsh-launcher-home/.dsh-launcher"
+        };
+        assert_eq!(paths.root, PathBuf::from(expected));
     }
 }

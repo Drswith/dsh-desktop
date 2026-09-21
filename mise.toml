@@ -8,14 +8,19 @@ rust = "1.89"
 "cargo:tauri-cli" = "2.11.5"
 
 [tasks.dev]
-description = "开发模式启动"
+description = "开发模式启动（测试图标与隔离数据目录）"
 dir = "{{config_root}}"
-run = "cargo tauri dev"
+run = "DSH_LAUNCHER_TEST_BUILD=1 cargo tauri dev --config src-tauri/tauri.test.conf.json"
 
 [tasks.build]
 description = "出正式包（.app / .dmg 等，产物在 src-tauri/target/release/bundle）"
 dir = "{{config_root}}"
 run = "cargo tauri build"
+
+[tasks.build-test]
+description = "出隔离测试包（Debug，使用 ~/.dsh-launcher-dev）"
+dir = "{{config_root}}"
+run = "DSH_LAUNCHER_TEST_BUILD=1 cargo tauri build --debug --config src-tauri/tauri.test.conf.json"
 
 [tasks.test]
 description = "单元测试"

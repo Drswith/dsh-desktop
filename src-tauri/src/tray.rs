@@ -22,10 +22,16 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::AppState;
 
+/// 由 `mise run build-test` 注入的编译期标记。正式构建不会设置它，因此不会
+/// 把测试徽章带进正式包。
+const TEST_BUILD: bool = cfg!(dsh_launcher_test_build);
+
 /// 菜单建好之后，`lib.rs` 还需要用到「打开 DSH」项；其余动作直接在这里分发。
 pub struct TrayHandles {
     pub status_item: MenuItem<Wry>,
-    pub runtime_item: MenuItem<Wry>,
+    pub runtime_dsh_item: MenuItem<Wry>,
+    pub runtime_node_item: MenuItem<Wry>,
+    pub runtime_pnpm_item: MenuItem<Wry>,
     pub open_item: MenuItem<Wry>,
     pub copy_item: MenuItem<Wry>,
     pub start_item: MenuItem<Wry>,
@@ -35,7 +41,21 @@ pub struct TrayHandles {
 
 pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<TrayHandles> {
     let status_item = MenuItem::with_id(app, "status", "状态：启动中…", false, None::<&str>)?;
-    let runtime_item = MenuItem::with_id(app, "runtime", "运行时：读取中…", false, None::<&str>)?;
+    let runtime_source_item = MenuItem::with_id(app, "runtime-source", "来源：外部", false, None::<&str>)?;
+    let runtime_dsh_item = MenuItem::with_id(app, "runtime-dsh", "DSH：读取中…", false, None::<&str>)?;
+    let runtime_node_item = MenuItem::with_id(app, "runtime-node", "Node.js：读取中…", false, None::<&str>)?;
+    let runtime_pnpm_item = MenuItem::with_id(app, "runtime-pnpm", "pnpm：读取中…", false, None::<&str>)?;
+    let runtime_menu = Submenu::with_items(
+        app,
+        "运行时",
+        true,
+        &[
+            &runtime_source_item,
+            &runtime_dsh_item,
+            &runtime_node_item,
+            &runtime_pnpm_item,
+        ],
+    )?;
     let open_item = MenuItem::with_id(app, "open", "启动中…", false, None::<&str>)?;
     let copy_item = MenuItem::with_id(app, "copy", "复制访问链接", false, None::<&str>)?;
     let start_item = MenuItem::with_id(app, "start", "启动", true, None::<&str>)?;
@@ -67,7 +87,7 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
         app,
         &[
             &status_item,
-            &runtime_item,
+            &runtime_menu,
             &PredefinedMenuItem::separator(app)?,
             &open_item,
             &copy_item,
@@ -136,14 +156,20 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
     // 其它平台没有这个概念，用带色图标即可。
     #[cfg(target_os = "macos")]
     {
-        builder = builder.icon_as_template(true);
+        // 测试图标包含琥珀色徽章，不能交给 macOS 按模板图重新着色；正式图标
+        // 仍保持 Swift 版的纯模板行为。
+        if !TEST_BUILD {
+            builder = builder.icon_as_template(true);
+        }
     }
 
     builder.build(app)?;
 
     Ok(TrayHandles {
         status_item,
-        runtime_item,
+        runtime_dsh_item,
+        runtime_node_item,
+        runtime_pnpm_item,
         open_item,
         copy_item,
         start_item,
@@ -344,12 +370,24 @@ pub(crate) fn show_about(app: &AppHandle) {
     });
 }
 
-pub(crate) fn refresh_runtime_summary(app: &AppHandle, item: MenuItem<Wry>) {
+pub(crate) fn refresh_runtime_summary(
+    app: &AppHandle,
+    dsh_item: MenuItem<Wry>,
+    node_item: MenuItem<Wry>,
+    pnpm_item: MenuItem<Wry>,
+) {
     let app = app.clone();
     thread::spawn(move || {
-        let summary = runtime_summary(&app);
+        let home = app
+            .path()
+            .home_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let paths = crate::config::AppPaths::new(home.clone());
+        let (dsh, node, pnpm) = runtime_versions(&home, &paths.config);
         let _ = app.run_on_main_thread(move || {
-            let _ = item.set_text(summary);
+            let _ = dsh_item.set_text(format!("DSH：{dsh}"));
+            let _ = node_item.set_text(format!("Node.js：{node}"));
+            let _ = pnpm_item.set_text(format!("pnpm：{pnpm}"));
         });
     });
 }
@@ -416,16 +454,6 @@ fn runtime_versions(home: &std::path::Path, config_path: &std::path::Path) -> (S
     let pnpm_version = command_version(&pnpm_program, &["--version"], &environment)
         .unwrap_or_else(|| "未找到 pnpm 命令".to_owned());
     (dsh_version, node_version, pnpm_version)
-}
-
-fn runtime_summary(app: &AppHandle) -> String {
-    let home = app
-        .path()
-        .home_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let paths = crate::config::AppPaths::new(home.clone());
-    let (dsh, node, pnpm) = runtime_versions(&home, &paths.config);
-    format!("运行时：外部 · DSH {dsh} · Node.js {node} · pnpm {pnpm}")
 }
 
 fn show_about_dialog(app: &AppHandle, details: String) {
@@ -641,8 +669,13 @@ fn confirm_quit(app: &AppHandle) {
         });
 }
 
-/// 内置的托盘图标：macOS 用沿用自 Swift 版的模板图，其它平台用带色的方形图标。
+/// 内置的托盘图标：测试构建使用带琥珀色徽章的变体，其它构建沿用正式图标。
 fn tray_icon() -> Image<'static> {
+    if TEST_BUILD {
+        return Image::from_bytes(include_bytes!("../icons/test-menubar/32x32.png"))
+            .expect("测试托盘图标解码失败");
+    }
+
     #[cfg(target_os = "macos")]
     {
         Image::from_bytes(include_bytes!("../icons/MenuBarIconTemplate@2x.png"))

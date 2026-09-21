@@ -103,8 +103,8 @@ pub fn run() {
             );
 
             // 记这次 dsh 子进程的 pid，方便下次启动时发现并清理没能正常退出而
-            // 遗留下来的孤儿；拿不到应用数据目录（少见）就不记，不影响本次使用。
-            let record_path = app.path().app_data_dir().ok().map(|dir| dir.join("dsh.pid"));
+            // 遗留下来的孤儿；记录跟随当前构建的数据目录，避免 debug/release 互相污染。
+            let record_path = Some(paths.root.join("dsh.pid"));
             let auto_open = std::env::var("DSH_LAUNCHER_NO_OPEN").as_deref() != Ok("1");
 
             let dsh_process = dsh::DshProcess::spawn(dsh::DshSpawnOptions {
@@ -130,7 +130,12 @@ pub fn run() {
                 quit_dialog_open: AtomicBool::new(false),
             });
 
-            tray::refresh_runtime_summary(app.handle(), handles.runtime_item.clone());
+            tray::refresh_runtime_summary(
+                app.handle(),
+                handles.runtime_dsh_item.clone(),
+                handles.runtime_node_item.clone(),
+                handles.runtime_pnpm_item.clone(),
+            );
             if let Some(error) = config_error {
                 tray::show_config_error(app.handle(), &paths.config, &error);
             }
