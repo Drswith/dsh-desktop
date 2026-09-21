@@ -78,6 +78,10 @@ struct LaunchSpec {
     preflight_child: Arc<Mutex<Option<ManagedChild>>>,
     preflight_active: Arc<AtomicBool>,
     preflight_generation: Arc<AtomicU64>,
+    /// 当前启动会话是否需要发送阶段通知；自动看门狗重试会关闭它，避免刷屏。
+    startup_notification_requested: Arc<AtomicBool>,
+    /// 当前启动会话是否仍在等待 DSH 就绪，用于发送慢启动提醒。
+    startup_notification_active: Arc<AtomicBool>,
 }
 
 pub struct DshProcess {
@@ -98,6 +102,8 @@ impl DshProcess {
         let preflight_child = Arc::new(Mutex::new(None));
         let preflight_active = Arc::new(AtomicBool::new(false));
         let preflight_generation = Arc::new(AtomicU64::new(0));
+        let startup_notification_requested = Arc::new(AtomicBool::new(true));
+        let startup_notification_active = Arc::new(AtomicBool::new(true));
         let spec = Arc::new(LaunchSpec {
             preferred_port: options.preferred_port,
             port_attempts: options.port_attempts,
@@ -117,7 +123,10 @@ impl DshProcess {
             preflight_child: Arc::clone(&preflight_child),
             preflight_active,
             preflight_generation,
+            startup_notification_requested,
+            startup_notification_active,
         });
+        crate::tray::notify(&spec.app, "DSH Launcher", "正在初始化 DSH…");
         if let Some(path) = &spec.record_path {
             kill_stale_orphan(path);
         }
@@ -192,6 +201,7 @@ impl DshProcess {
     pub fn start(&self) {
         self.desired_running.store(true, Ordering::SeqCst);
         self.manual_start.store(true, Ordering::SeqCst);
+        begin_startup_notifications(&self.spec);
         set_controls(&self.spec, false, true, true);
         self.spec.logs.launcher.log("watchdog", "manual start requested");
     }
@@ -200,6 +210,7 @@ impl DshProcess {
         self.desired_running.store(false, Ordering::SeqCst);
         self.manual_start.store(false, Ordering::SeqCst);
         self.manual_restart.store(false, Ordering::SeqCst);
+        cancel_startup_notifications(&self.spec);
         cancel_preflight(&self.spec);
         terminate_current(&self.child, &self.spec);
         clear_ready(&self.ready_url, &self.spec.open_item, &self.spec.copy_item);
@@ -224,6 +235,7 @@ impl DshProcess {
         self.desired_running.store(true, Ordering::SeqCst);
         self.manual_restart.store(true, Ordering::SeqCst);
         self.manual_start.store(true, Ordering::SeqCst);
+        begin_startup_notifications(&self.spec);
         set_controls(&self.spec, false, true, true);
         cancel_preflight(&self.spec);
         terminate_current(&self.child, &self.spec);
@@ -248,6 +260,7 @@ impl DshProcess {
     pub fn kill(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         self.desired_running.store(false, Ordering::SeqCst);
+        cancel_startup_notifications(&self.spec);
         cancel_preflight(&self.spec);
         terminate_current(&self.child, &self.spec);
         remove_record(&self.spec.record_path);
@@ -340,7 +353,7 @@ fn supervise(
                 continue;
             }
             match spawn_child(&spec, &child, &ready_url, &generation, &browser_gate) {
-                Ok(now) => {
+                Ok((now, _announced)) => {
                     started_at = now;
                     next_health = now + HEALTH_INTERVAL;
                     health_failures = 0;
@@ -362,7 +375,10 @@ fn supervise(
         }
 
         if ready_url.lock().unwrap().is_none() {
-            if !startup_notification_sent && started_at.elapsed() >= STARTUP_NOTIFY_AFTER {
+            if spec.startup_notification_active.load(Ordering::SeqCst)
+                && !startup_notification_sent
+                && started_at.elapsed() >= STARTUP_NOTIFY_AFTER
+            {
                 crate::tray::notify(
                     &spec.app,
                     "DSH Launcher",
@@ -436,12 +452,15 @@ fn schedule_failure(
 ) {
     spec.logs.launcher.log("watchdog", reason);
     if !desired_running.load(Ordering::SeqCst) {
+        cancel_startup_notifications(spec);
         set_menu(&spec.open_item, "已停止", false);
         set_status(&spec.status_item, "状态：已停止");
         set_controls(spec, true, false, false);
         return;
     }
     if manual_restart.swap(false, Ordering::SeqCst) {
+        spec.startup_notification_requested.store(true, Ordering::SeqCst);
+        spec.startup_notification_active.store(true, Ordering::SeqCst);
         *next_spawn = Instant::now();
         *backoff_index = 0;
         set_menu(&spec.open_item, "启动中…", false);
@@ -449,6 +468,10 @@ fn schedule_failure(
         set_controls(spec, false, true, true);
         return;
     }
+
+    // 这是看门狗自动重试，不开启新的通知会话；下一次真正的手动启动/重启
+    // 会在对应入口重新打开通知会话。
+    cancel_startup_notifications(spec);
 
     let now = Instant::now();
     while crash_times
@@ -485,6 +508,9 @@ fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
         return;
     }
     let preflight_generation = spec.preflight_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    if spec.startup_notification_active.load(Ordering::SeqCst) {
+        crate::tray::notify(&spec.app, "DSH Launcher", "正在检查构建许可…");
+    }
     set_menu(&spec.open_item, "检查构建许可…", false);
     set_status(&spec.status_item, "状态：检查构建许可…");
     set_controls(&spec, false, true, true);
@@ -536,6 +562,7 @@ fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
                         } else {
                             dialog_desired.store(false, Ordering::SeqCst);
                             dialog_spec.preflight_active.store(false, Ordering::SeqCst);
+                            cancel_startup_notifications(&dialog_spec);
                             set_menu(&dialog_spec.open_item, "等待许可", false);
                             set_status(&dialog_spec.status_item, "状态：等待构建许可");
                             set_controls(&dialog_spec, true, false, false);
@@ -550,9 +577,11 @@ fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
             Err(error) => {
                 worker_spec.preflight_active.store(false, Ordering::SeqCst);
                 if !desired_running.load(Ordering::SeqCst) {
+                    cancel_startup_notifications(&worker_spec);
                     return;
                 }
                 desired_running.store(false, Ordering::SeqCst);
+                cancel_startup_notifications(&worker_spec);
                 set_menu(&worker_spec.open_item, "启动失败", false);
                 set_status(
                     &worker_spec.status_item,
@@ -583,6 +612,7 @@ fn approve_preflight(
     if let Err(error) = config.persist_build_approval(&spec.config_path, &package, &dependencies) {
         spec.preflight_active.store(false, Ordering::SeqCst);
         desired_running.store(false, Ordering::SeqCst);
+        cancel_startup_notifications(spec);
         set_menu(&spec.open_item, "启动失败", false);
         set_status(&spec.status_item, "状态：启动失败 · 无法保存构建许可");
         set_controls(spec, true, false, false);
@@ -650,11 +680,19 @@ fn run_preflight(spec: &Arc<LaunchSpec>) -> Result<Vec<String>, String> {
     let _ = spec.preflight_child.lock().unwrap().take();
     let stdout = stdout_reader.join().unwrap_or_default();
     let stderr = stderr_reader.join().unwrap_or_default();
+    preflight_result(status.success(), &stdout, &stderr)
+}
+
+/// pnpm 11/12 在发现被忽略的构建脚本时会以非零状态退出，同时把可供用户
+/// 确认的依赖列在输出里。这个退出状态不是预检本身失败，必须先让调用方
+/// 进入构建许可确认流程；真正没有可确认依赖的非零退出才应该报告为错误。
+fn preflight_result(status_success: bool, stdout: &str, stderr: &str) -> Result<Vec<String>, String> {
     let combined = format!("{stdout}\n{stderr}");
-    if !status.success() {
+    let dependencies = parse_ignored_build_scripts(&combined);
+    if !status_success && dependencies.is_empty() {
         return Err(format!("pnpm 预检失败：{}", compact_reason(&combined)));
     }
-    Ok(parse_ignored_build_scripts(&combined))
+    Ok(dependencies)
 }
 
 fn parse_ignored_build_scripts(output: &str) -> Vec<String> {
@@ -707,6 +745,7 @@ fn handle_spawn_error(spec: &LaunchSpec, error: &std::io::Error) {
     spec.logs
         .launcher
         .log("watchdog", &format!("initial spawn failed: {error}"));
+    cancel_startup_notifications(spec);
     set_menu(&spec.open_item, "启动失败", false);
     let status = format!("状态：启动失败 · {}", compact_reason(&error.to_string()));
     set_status(&spec.status_item, &status);
@@ -726,6 +765,17 @@ fn cancel_preflight(spec: &Arc<LaunchSpec>) {
     terminate_preflight(&spec.preflight_child);
 }
 
+fn begin_startup_notifications(spec: &LaunchSpec) {
+    spec.startup_notification_requested.store(true, Ordering::SeqCst);
+    spec.startup_notification_active.store(true, Ordering::SeqCst);
+    crate::tray::notify(&spec.app, "DSH Launcher", "正在初始化 DSH…");
+}
+
+fn cancel_startup_notifications(spec: &LaunchSpec) {
+    spec.startup_notification_requested.store(false, Ordering::SeqCst);
+    spec.startup_notification_active.store(false, Ordering::SeqCst);
+}
+
 fn is_current_preflight(spec: &LaunchSpec, generation: u64) -> bool {
     spec.preflight_active.load(Ordering::SeqCst)
         && spec.preflight_generation.load(Ordering::SeqCst) == generation
@@ -737,7 +787,7 @@ fn spawn_child(
     ready_url: &Arc<Mutex<Option<Url>>>,
     generation: &Arc<AtomicU64>,
     browser_gate: &Arc<Mutex<Instant>>,
-) -> std::io::Result<Instant> {
+) -> std::io::Result<(Instant, bool)> {
     let config = spec.config.lock().unwrap().clone();
     let preferred_port = config.port.unwrap_or(spec.preferred_port);
     let port = match first_available_port(preferred_port, spec.port_attempts) {
@@ -771,6 +821,10 @@ fn spawn_child(
         ),
     );
     let mut process = ManagedChild::spawn(&mut command)?;
+    let announce_startup = spec.startup_notification_requested.swap(false, Ordering::SeqCst);
+    if announce_startup {
+        crate::tray::notify(&spec.app, "DSH Launcher", "正在启动 DSH…");
+    }
     if let Some(path) = &spec.record_path {
         write_record(
             path,
@@ -798,6 +852,8 @@ fn spawn_child(
     let watcher_status = spec.status_item.clone();
     let watcher_log = spec.logs.dsh.clone();
     let launcher_log = spec.logs.launcher.clone();
+    let watcher_notification_active = Arc::clone(&spec.startup_notification_active);
+    let watcher_announce_ready = announce_startup;
     let auto_open = spec.auto_open;
     thread::spawn(move || {
         let mut ready = false;
@@ -813,11 +869,14 @@ fn spawn_child(
                 let _ = watcher_copy.set_enabled(true);
                 let _ =
                     watcher_status.set_text(format!("状态：运行中 · 端口 {}", url.port().unwrap_or(port)));
-                crate::tray::notify(
-                    &watcher_app,
-                    "DSH 已就绪",
-                    &format!("本地服务已启动，端口 {}。", url.port().unwrap_or(port)),
-                );
+                if watcher_announce_ready {
+                    crate::tray::notify(
+                        &watcher_app,
+                        "DSH 已就绪",
+                        &format!("本地服务已启动，端口 {}。", url.port().unwrap_or(port)),
+                    );
+                }
+                watcher_notification_active.store(false, Ordering::SeqCst);
                 launcher_log.log(
                     "launcher",
                     &format!("dsh ready port={}", url.port().unwrap_or(port)),
@@ -837,7 +896,7 @@ fn spawn_child(
         }
     });
 
-    Ok(Instant::now())
+    Ok((Instant::now(), announce_startup))
 }
 
 fn terminate_current(child: &Arc<Mutex<Option<ManagedChild>>>, spec: &LaunchSpec) {
@@ -855,8 +914,19 @@ fn clear_ready(ready_url: &Arc<Mutex<Option<Url>>>, open_item: &MenuItem<Wry>, c
 
 fn compact_reason(reason: &str) -> String {
     const MAX_CHARS: usize = 96;
-    let mut result = reason.chars().take(MAX_CHARS).collect::<String>();
-    if reason.chars().count() > MAX_CHARS {
+    let lines = reason
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let candidate = lines
+        .iter()
+        .find(|line| line.contains("ERR_") || line.starts_with("Error:") || line.starts_with("error:"))
+        .copied()
+        .or_else(|| lines.last().copied())
+        .unwrap_or(reason.trim());
+    let mut result = candidate.chars().take(MAX_CHARS).collect::<String>();
+    if candidate.chars().count() > MAX_CHARS {
         result.push('…');
     }
     result
@@ -1077,5 +1147,24 @@ mod tests {
                 "protobufjs"
             ]
         );
+    }
+
+    #[test]
+    fn treats_pnpm_ignored_builds_as_confirmation_when_exit_is_nonzero() {
+        let output = r#"
+Error: ERR_PNPM_IGNORED_BUILDS
+│ Ignored build scripts: node-pty@1.2.0-beta.15, koffi@3.3.1 │
+│ Run "pnpm approve-builds" to pick which dependencies should be allowed       │
+"#;
+        assert_eq!(
+            preflight_result(false, "", output).unwrap(),
+            vec!["koffi", "node-pty"]
+        );
+    }
+
+    #[test]
+    fn reports_nonzero_pnpm_exit_without_ignored_builds() {
+        let error = preflight_result(false, "", "Error: ERR_PNPM_FETCH_404").unwrap_err();
+        assert_eq!(error, "pnpm 预检失败：Error: ERR_PNPM_FETCH_404");
     }
 }
