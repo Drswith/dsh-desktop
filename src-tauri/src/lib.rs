@@ -7,6 +7,7 @@
 //! 在 macOS 上实际跑过、点过。
 
 mod dsh;
+mod process_tree;
 mod ready_line;
 mod tray;
 

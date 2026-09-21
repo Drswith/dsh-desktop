@@ -5,12 +5,12 @@
 //! 遗留下来的 dsh 不会一直占着端口。自己把子进程杀干净之后会删掉这个文件；
 //! 拿不到应用数据目录（少见）就跳过这一整套，不影响本次正常使用。
 //!
-//! 只处理直接子进程这一层：`dsh` 自己再往下开的子进程不在记录里，也不会被这里
-//! 清理——那是另一个还没做的加固（见 README「已知限制」）。
+//! Unix 上会把 `dsh` 放进独立进程组，正常的 shell/script/worker 子进程会随组
+//! 一起清理；显式 daemonize、创建新 session 的进程仍可能主动逃逸。
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::{fs, thread};
 
@@ -19,10 +19,11 @@ use tauri::menu::MenuItem;
 use tauri::Wry;
 use url::Url;
 
+use crate::process_tree::ManagedChild;
 use crate::ready_line;
 
 pub struct DshProcess {
-    child: Option<Child>,
+    child: Option<ManagedChild>,
     ready_url: Arc<Mutex<Option<Url>>>,
     record_path: Option<PathBuf>,
 }
@@ -38,7 +39,8 @@ impl DshProcess {
             kill_stale_orphan(path);
         }
 
-        let mut child = Command::new("dsh")
+        let mut command = Command::new("dsh");
+        command
             .args([
                 "web",
                 "--no-open",
@@ -49,14 +51,20 @@ impl DshProcess {
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .stdin(Stdio::null())
-            .spawn()?;
+            .stdin(Stdio::null());
+        let mut child = ManagedChild::spawn(&mut command)?;
 
         if let Some(path) = &record_path {
-            write_record(path, child.id(), port);
+            write_record(
+                path,
+                child.id(),
+                port,
+                child.process_group_id(),
+                process_start_time(child.id()),
+            );
         }
 
-        let stdout = child.stdout.take().expect("stdout 已经设成 piped");
+        let stdout = child.take_stdout().expect("stdout 已经设成 piped");
         let ready_url = Arc::new(Mutex::new(None));
         let watcher_url = Arc::clone(&ready_url);
 
@@ -87,8 +95,7 @@ impl DshProcess {
     /// 尽力停掉子进程、删掉记录文件；失败也不阻塞应用退出。
     pub fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.terminate();
         }
         if let Some(path) = &self.record_path {
             let _ = fs::remove_file(path);
@@ -108,12 +115,12 @@ fn kill_stale_orphan(record_path: &Path) {
     let Ok(contents) = fs::read_to_string(record_path) else {
         return;
     };
-    let Some(pid) = contents.lines().next().and_then(|line| line.parse::<u32>().ok()) else {
+    let Some(record) = ProcessRecord::parse(&contents) else {
         return;
     };
 
     let system = System::new_all();
-    let Some(process) = system.process(Pid::from_u32(pid)) else {
+    let Some(process) = system.process(Pid::from_u32(record.pid)) else {
         return;
     };
 
@@ -122,17 +129,61 @@ fn kill_stale_orphan(record_path: &Path) {
         .cmd()
         .iter()
         .any(|arg| arg.to_string_lossy().to_lowercase().contains("dsh"));
-    if !name_has_dsh && !cmd_has_dsh {
+    let start_time_matches = record
+        .start_time
+        .is_none_or(|expected| expected == process.start_time());
+    let group_id_matches = record.group_id.is_none_or(|group_id| group_id == record.pid);
+    if (!name_has_dsh && !cmd_has_dsh) || !start_time_matches || !group_id_matches {
         return; // 不像我们认识的那个 dsh，不碰
     }
 
-    eprintln!("发现上次遗留的 dsh 进程（pid {pid}），清理掉");
-    process.kill();
+    eprintln!(
+        "发现上次遗留的 dsh 进程（pid {}，端口 {}），清理进程树",
+        record.pid, record.port
+    );
+    if record.group_id.is_some() {
+        crate::process_tree::terminate_record(record.pid, record.group_id);
+    } else {
+        // 兼容旧的两行记录，也覆盖 Windows Job Object 创建失败时的回退。
+        let _ = process.kill();
+    }
 }
 
-fn write_record(record_path: &Path, pid: u32, port: u16) {
+fn process_start_time(pid: u32) -> Option<u64> {
+    let system = System::new_all();
+    system
+        .process(Pid::from_u32(pid))
+        .map(|process| process.start_time())
+}
+
+struct ProcessRecord {
+    pid: u32,
+    port: u16,
+    group_id: Option<u32>,
+    start_time: Option<u64>,
+}
+
+impl ProcessRecord {
+    fn parse(contents: &str) -> Option<Self> {
+        let mut lines = contents.lines();
+        let pid = lines.next()?.parse().ok()?;
+        let port = lines.next()?.parse().ok()?;
+        let group_id = lines.next().and_then(|line| line.parse().ok());
+        let start_time = lines.next().and_then(|line| line.parse().ok());
+        Some(Self {
+            pid,
+            port,
+            group_id,
+            start_time,
+        })
+    }
+}
+
+fn write_record(record_path: &Path, pid: u32, port: u16, group_id: Option<u32>, start_time: Option<u64>) {
     if let Some(parent) = record_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(record_path, format!("{pid}\n{port}\n"));
+    let group_id = group_id.map_or_else(|| "-".to_owned(), |value| value.to_string());
+    let start_time = start_time.map_or_else(|| "-".to_owned(), |value| value.to_string());
+    let _ = fs::write(record_path, format!("{pid}\n{port}\n{group_id}\n{start_time}\n"));
 }

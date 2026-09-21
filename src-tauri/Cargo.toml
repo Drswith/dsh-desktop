@@ -33,6 +33,17 @@ url = "2"
 # 磁盘/网络/组件之类用不到的模块。
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [profile.release]
 codegen-units = 1
 lto = true

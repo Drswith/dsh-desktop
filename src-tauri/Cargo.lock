@@ -839,6 +839,7 @@ dependencies = [
 name = "dsh-launcher"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sysinfo",
  "tauri",
  "tauri-build",
@@ -846,6 +847,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
