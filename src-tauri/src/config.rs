@@ -8,6 +8,8 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 const SHIPPED_PROFILES: &[&str] = &["acp", "web", "headless", "sdk", "sdk-minimal"];
+const DEFAULT_RUNNER_COMMAND: &str = "pnpm";
+const DEFAULT_DSH_PACKAGE: &str = "@deepseek-ai/dsh@0.1.5-rc.2";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -19,7 +21,36 @@ pub struct ShellConfig {
     #[serde(rename = "extraArgs")]
     pub extra_args: Vec<String>,
     pub environment: BTreeMap<String, String>,
+    /// 外部包管理器 Runner。未填写时使用 pnpm dlx 启动固定版本的 DSH。
+    pub runner: Option<RunnerConfig>,
+    /// 旧版外部 Node + entry 配置，保留用于兼容已有配置；runner 优先。
     pub runtime: Option<RuntimeConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RunnerConfig {
+    /// 可以填写 `pnpm`、`npx` 或可执行文件绝对路径。
+    pub command: String,
+    /// 必须是固定版本，例如 `@deepseek-ai/dsh@0.1.5-rc.2`。
+    pub package: String,
+    /// 用户确认后允许执行 postinstall 的依赖包名。
+    #[serde(rename = "allowBuild")]
+    pub allow_build: Vec<String>,
+    /// `allowBuild` 针对的精确 DSH 包规格；版本变化后会重新预检。
+    #[serde(rename = "allowBuildFor")]
+    pub allow_build_for: Option<String>,
+}
+
+impl Default for RunnerConfig {
+    fn default() -> Self {
+        Self {
+            command: DEFAULT_RUNNER_COMMAND.to_owned(),
+            package: DEFAULT_DSH_PACKAGE.to_owned(),
+            allow_build: Vec::new(),
+            allow_build_for: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -95,10 +126,131 @@ impl ShellConfig {
         )
     }
 
+    pub fn effective_runner(&self) -> RunnerConfig {
+        self.runner.clone().unwrap_or_default()
+    }
+
+    pub fn uses_pnpm_runner(&self) -> bool {
+        let runner = self.effective_runner();
+        let command_name = Path::new(&runner.command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&runner.command)
+            .to_ascii_lowercase();
+        command_name == "pnpm" || command_name == "pnpm.exe"
+    }
+
+    /// 只有用户已经确认过同一个精确 DSH 包规格，才跳过构建许可预检。
+    pub fn needs_build_preflight(&self) -> bool {
+        if self.runner.is_none() && self.runtime.is_some() {
+            return false;
+        }
+        let runner = self.effective_runner();
+        self.uses_pnpm_runner() && runner.allow_build_for.as_deref() != Some(runner.package.as_str())
+    }
+
+    /// 预检只解析并安装到 pnpm 的临时缓存，不启动 Web 服务。
+    pub fn runner_preflight_command(&self) -> Result<(String, Vec<String>), String> {
+        let runner = self.effective_runner();
+        validate_runner(&runner)?;
+        if !self.uses_pnpm_runner() {
+            return Err(
+                "只有 pnpm Runner 支持自动发现 build 许可；请改用 pnpm 或直接配置 allowBuild。".to_owned(),
+            );
+        }
+        Ok((
+            runner.command,
+            vec![
+                "dlx".to_owned(),
+                "--reporter".to_owned(),
+                "append-only".to_owned(),
+                runner.package,
+                "--version".to_owned(),
+            ],
+        ))
+    }
+
+    /// 将用户确认的许可写回配置，同时绑定当前精确 DSH 包规格。
+    pub fn persist_build_approval(
+        &mut self,
+        path: &Path,
+        package: &str,
+        dependencies: &[String],
+    ) -> Result<(), String> {
+        let mut document = if path.exists() {
+            let contents = fs::read_to_string(path).map_err(|error| format!("读取配置失败：{error}"))?;
+            serde_json::from_str::<serde_json::Value>(&contents)
+                .map_err(|error| format!("解析配置失败：{error}"))?
+        } else {
+            serde_json::from_str::<serde_json::Value>(&Self::template_json())
+                .map_err(|error| format!("生成配置模板失败：{error}"))?
+        };
+        let mut runner = self.effective_runner();
+        runner.allow_build = dependencies.to_vec();
+        runner.allow_build_for = Some(package.to_owned());
+        let runner_value =
+            serde_json::to_value(&runner).map_err(|error| format!("序列化 Runner 配置失败：{error}"))?;
+        document
+            .as_object_mut()
+            .ok_or_else(|| "配置根节点必须是 JSON 对象。".to_owned())?
+            .insert("runner".to_owned(), runner_value);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建配置目录失败：{error}"))?;
+        }
+        let contents =
+            serde_json::to_string_pretty(&document).map_err(|error| format!("格式化配置失败：{error}"))?;
+        fs::write(path, format!("{contents}\n")).map_err(|error| format!("写入配置失败：{error}"))?;
+        self.runner = Some(runner);
+        Ok(())
+    }
+
+    /// 构造真正交给 `Command` 的程序和参数。
+    ///
+    /// Runner 是默认路径；旧的 `runtime.node`/`runtime.entry` 只在没有显式
+    /// runner 时作为兼容回退。这样既不要求全局安装 dsh，也不会破坏已有的
+    /// Swift 风格外部 entry 配置。
+    pub fn launch_command(&self, port: u16, home: &Path) -> Result<(String, Vec<String>), String> {
+        let dsh_arguments = self.arguments(port, home);
+        if self.runner.is_some() || self.runtime.is_none() {
+            let runner = self.effective_runner();
+            validate_runner(&runner)?;
+            let command_name = Path::new(&runner.command)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&runner.command)
+                .to_ascii_lowercase();
+            let mut arguments = Vec::new();
+            if command_name == "pnpm" || command_name == "pnpm.exe" {
+                arguments.push("dlx".to_owned());
+                for dependency in &runner.allow_build {
+                    arguments.push(format!("--allow-build={dependency}"));
+                }
+                arguments.push(runner.package);
+            } else if command_name == "npx" || command_name == "npx.cmd" {
+                arguments.push("--yes".to_owned());
+                arguments.push(runner.package);
+            } else {
+                return Err(format!(
+                    "不支持的 Runner 命令：{}。目前只支持 pnpm 或 npx。",
+                    runner.command
+                ));
+            }
+            arguments.extend(dsh_arguments);
+            return Ok((runner.command, arguments));
+        }
+
+        let (executable, entry) = self.runtime_command();
+        let mut arguments = Vec::new();
+        if let Some(entry) = entry {
+            arguments.push(entry);
+        }
+        arguments.extend(dsh_arguments);
+        Ok((executable, arguments))
+    }
+
     pub fn template_json() -> String {
         // `_comment` 会被 serde 忽略，保留在文件里是为了让第一次打开配置的
-        // 用户知道每个字段的作用；runtime 明确保持 null，避免误把 dsh 当成
-        // Node entry 传给自定义运行时。
+        // 用户知道每个字段的作用；runner 是默认启动链路，runtime 仅为旧配置保留。
         r#"{
   "_comment": "DSH Launcher 配置。修改后选择“重启”生效；启动器不会安装或升级 runtime。",
   "_comment_port": "监听端口；被占用时会按顺序向后尝试最多 20 个端口。",
@@ -111,7 +263,15 @@ impl ShellConfig {
   "extraArgs": [],
   "_comment_environment": "传给 dsh 的额外环境变量，会覆盖登录 shell 环境。",
   "environment": {},
-  "_comment_runtime": "可选外部运行时，例如 {\"node\":\"/path/to/node\",\"entry\":\"/path/to/dsh.js\"}。",
+  "_comment_runner": "默认通过外部 pnpm dlx 启动 DSH；首次或版本变化时会自动预检并请求构建许可。",
+  "runner": {
+    "command": "pnpm",
+    "package": "@deepseek-ai/dsh@0.1.5-rc.2",
+    "_comment_allowBuild": "只填写用户确认过的依赖；不要手工猜测，启动器会在首次启动时自动发现。",
+    "allowBuild": [],
+    "allowBuildFor": null
+  },
+  "_comment_runtime": "旧版兼容配置；仅在 runner 缺省时使用，例如 {\"node\":\"/path/to/node\",\"entry\":\"/path/to/dsh.js\"}。",
   "runtime": null
 }
 "#
@@ -155,6 +315,42 @@ impl ShellConfig {
         arguments.extend(self.extra_args.iter().cloned());
         arguments
     }
+}
+
+fn validate_runner(runner: &RunnerConfig) -> Result<(), String> {
+    if runner.command.trim().is_empty() {
+        return Err("Runner command 不能为空。".to_owned());
+    }
+    let prefix = "@deepseek-ai/dsh@";
+    let Some(version) = runner.package.strip_prefix(prefix) else {
+        return Err(format!(
+            "Runner package 必须是固定版本的 {prefix}<version>，当前为：{}",
+            runner.package
+        ));
+    };
+    let version_core = version.split(['-', '+']).next().unwrap_or_default();
+    let segments = version_core.split('.').collect::<Vec<_>>();
+    if segments.len() != 3
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || !segment.chars().all(|c| c.is_ascii_digit()))
+        || version
+            .chars()
+            .any(|character| matches!(character, '^' | '~' | '*' | '>' | '<' | '=' | ' '))
+    {
+        return Err(format!(
+            "Runner package 必须使用精确版本，不能使用 latest、^、~ 或范围：{}",
+            runner.package
+        ));
+    }
+    if runner
+        .allow_build
+        .iter()
+        .any(|name| name.trim().is_empty() || name.chars().any(|character| matches!(character, ',' | ' ')))
+    {
+        return Err("runner.allowBuild 中每项必须是单个依赖包名，不能包含逗号或空格。".to_owned());
+    }
+    Ok(())
 }
 
 fn login_environment() -> BTreeMap<String, String> {
@@ -258,12 +454,130 @@ mod tests {
     }
 
     #[test]
+    fn builds_pnpm_runner_command_with_multiple_build_permissions() {
+        let config = ShellConfig {
+            runner: Some(RunnerConfig {
+                command: "/opt/homebrew/bin/pnpm".to_owned(),
+                package: "@deepseek-ai/dsh@0.1.5-rc.2".to_owned(),
+                allow_build: vec!["esbuild".to_owned(), "sharp".to_owned()],
+                allow_build_for: None,
+            }),
+            ..ShellConfig::default()
+        };
+        let (command, arguments) = config.launch_command(31080, Path::new("/tmp/home")).unwrap();
+        assert_eq!(command, "/opt/homebrew/bin/pnpm");
+        assert_eq!(
+            arguments,
+            [
+                "dlx",
+                "--allow-build=esbuild",
+                "--allow-build=sharp",
+                "@deepseek-ai/dsh@0.1.5-rc.2",
+                "--profile",
+                "launcher",
+                "--from-default-profile",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "31080"
+            ]
+        );
+    }
+
+    #[test]
+    fn default_config_uses_pinned_pnpm_runner() {
+        let (command, arguments) = ShellConfig::default()
+            .launch_command(31080, Path::new("/tmp/home"))
+            .unwrap();
+        assert_eq!(command, "pnpm");
+        assert!(arguments.contains(&"@deepseek-ai/dsh@0.1.5-rc.2".to_owned()));
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument.starts_with("--allow-build=")));
+        assert!(ShellConfig::default().needs_build_preflight());
+    }
+
+    #[test]
+    fn builds_pnpm_preflight_command_without_build_permissions() {
+        let config = ShellConfig::default();
+        let (command, arguments) = config.runner_preflight_command().unwrap();
+        assert_eq!(command, "pnpm");
+        assert_eq!(
+            arguments,
+            [
+                "dlx",
+                "--reporter",
+                "append-only",
+                "@deepseek-ai/dsh@0.1.5-rc.2",
+                "--version"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unpinned_runner_package() {
+        let config = ShellConfig {
+            runner: Some(RunnerConfig {
+                package: "@deepseek-ai/dsh@latest".to_owned(),
+                ..RunnerConfig::default()
+            }),
+            ..ShellConfig::default()
+        };
+        let error = config.launch_command(31080, Path::new("/tmp/home")).unwrap_err();
+        assert!(error.contains("精确版本"), "{error}");
+    }
+
+    #[test]
     fn template_is_documented_and_loadable() {
         let template = ShellConfig::template_json();
         let config: ShellConfig = serde_json::from_str(&template).unwrap();
         assert_eq!(config.port, Some(31080));
         assert_eq!(config.profile(), "launcher");
         assert!(config.runtime.is_none());
+        assert_eq!(
+            config.runner.as_ref().map(|runner| runner.package.as_str()),
+            Some("@deepseek-ai/dsh@0.1.5-rc.2")
+        );
+        assert_eq!(
+            config
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.allow_build_for.as_deref()),
+            None
+        );
         assert!(template.contains("不会安装或升级 runtime"));
+    }
+
+    #[test]
+    fn persists_approval_and_binds_it_to_package_version() {
+        let path = std::env::temp_dir().join(format!(
+            "dsh-launcher-preflight-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_file(&path);
+        fs::write(
+            &path,
+            r#"{"_custom":"kept","runner":{"command":"pnpm","package":"@deepseek-ai/dsh@0.1.5-rc.2"}}"#,
+        )
+        .unwrap();
+        let mut config = ShellConfig::default();
+        let dependencies = vec!["node-pty".to_owned(), "koffi".to_owned()];
+        config
+            .persist_build_approval(&path, "@deepseek-ai/dsh@0.1.5-rc.2", &dependencies)
+            .unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("_custom"));
+        let loaded = ShellConfig::load(&path).unwrap();
+        let runner = loaded.runner.as_ref().unwrap();
+        assert_eq!(runner.allow_build, dependencies);
+        assert_eq!(
+            runner.allow_build_for.as_deref(),
+            Some("@deepseek-ai/dsh@0.1.5-rc.2")
+        );
+        assert!(!loaded.needs_build_preflight());
+        let _ = fs::remove_file(path);
     }
 }

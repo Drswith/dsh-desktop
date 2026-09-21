@@ -55,9 +55,17 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_store::Builder::default().build())
-        .on_menu_event(|app, event| tray::handle_menu_event(app, event.id().as_ref()))
+        // 托盘菜单由 TrayIconBuilder 自己分发；全局菜单只接收 app-* 项。
+        // 如果这里无条件转发，托盘点击会被处理两次，About/退出等对话框就会重复出现。
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            if matches!(id, "app-about" | "app-quit") {
+                tray::handle_menu_event(app, id);
+            }
+        })
         .setup(|app| {
             let home_dir = app.path().home_dir().unwrap_or_else(|_| PathBuf::from("."));
             let paths = config::AppPaths::new(home_dir.clone());

@@ -17,6 +17,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{image::Image, AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt as AutoStartManagerExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::AppState;
@@ -188,6 +189,65 @@ fn with_dsh(app: &AppHandle, action: impl FnOnce(&crate::dsh::DshProcess)) {
 }
 
 fn open_config(app: &AppHandle) {
+    open_config_file(app);
+}
+
+pub(crate) fn show_startup_error(app: &AppHandle, error: &str) {
+    let missing_runner = error.contains("No such file") || error.contains("找不到");
+    let message = if missing_runner {
+        "找不到外部 Runner 命令。\n\n本项目默认通过 pnpm dlx 启动固定版本的 @deepseek-ai/dsh，不要求全局安装 dsh。请确认 Node.js 和 pnpm 已安装，并且 pnpm 在登录 shell 的 PATH 中；也可以在 ~/.dsh-launcher/config.json 的 runner.command 中填写 pnpm 的绝对路径。\n\n启动器不会安装或升级 runtime。"
+    } else {
+        "DSH Runner 启动失败。\n\n启动器会继续保留托盘入口，你可以修正 runner 配置后点击“重启”。"
+    };
+    let app = app.clone();
+    app.dialog()
+        .message(format!("{message}\n\n详细原因：{error}"))
+        .title("DSH 启动失败")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "编辑配置".to_owned(),
+            "关闭".to_owned(),
+        ))
+        .show(move |open_config| {
+            if open_config {
+                open_config_file(&app);
+            }
+        });
+}
+
+pub(crate) fn confirm_build_permissions(
+    app: &AppHandle,
+    package: &str,
+    dependencies: &[String],
+    on_result: impl FnOnce(bool) + Send + 'static,
+) {
+    let dependency_list = dependencies
+        .iter()
+        .map(|dependency| format!("• {dependency}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.dialog()
+        .message(format!(
+            "固定 DSH 包 {package} 请求执行以下依赖的构建脚本：\n\n{dependency_list}\n\n这些脚本来自第三方 npm 依赖。允许后会写入配置，并仅对当前精确 DSH 包版本复用。"
+        ))
+        .title("需要确认 DSH 构建许可")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "允许并记住".to_owned(),
+            "取消".to_owned(),
+        ))
+        .show(on_result);
+}
+
+/// 只用于关键生命周期节点。托盘状态仍然是完整、可回看的状态源，通知不承载
+/// watchdog 每次重试的细节，避免后台重试时连续打扰用户。
+pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
+    if let Err(error) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("发送系统通知失败：{error}");
+    }
+}
+
+fn open_config_file(app: &AppHandle) {
     let home = app
         .path()
         .home_dir()
@@ -331,11 +391,29 @@ fn runtime_versions(home: &std::path::Path, config_path: &std::path::Path) -> (S
         .and_then(|runtime| runtime.node.as_deref())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("node");
-    let dsh_version =
-        command_version("dsh", &["--version"], &environment).unwrap_or_else(|| "未找到 dsh 命令".to_owned());
+    let pnpm_program = if config.runner.is_some() || config.runtime.is_none() {
+        let runner = config.effective_runner();
+        let command_name = std::path::Path::new(&runner.command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&runner.command)
+            .to_ascii_lowercase();
+        if command_name == "pnpm" || command_name == "pnpm.exe" {
+            runner.command
+        } else {
+            "pnpm".to_owned()
+        }
+    } else {
+        "pnpm".to_owned()
+    };
+    let dsh_version = if config.runner.is_some() || config.runtime.is_none() {
+        format!("包 {}", config.effective_runner().package)
+    } else {
+        command_version("dsh", &["--version"], &environment).unwrap_or_else(|| "未找到 dsh 命令".to_owned())
+    };
     let node_version = command_version(node_program, &["--version"], &environment)
         .unwrap_or_else(|| "未找到 node 命令".to_owned());
-    let pnpm_version = command_version("pnpm", &["--version"], &environment)
+    let pnpm_version = command_version(&pnpm_program, &["--version"], &environment)
         .unwrap_or_else(|| "未找到 pnpm 命令".to_owned());
     (dsh_version, node_version, pnpm_version)
 }

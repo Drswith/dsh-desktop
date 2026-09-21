@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "预留给以后加窗口用；托盘菜单和打开浏览器都是纯 Rust 调用，不走这层权限。",
   "windows": [],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }

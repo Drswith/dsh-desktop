@@ -27,6 +27,7 @@ use crate::process_tree::ManagedChild;
 use crate::ready_line;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
+const STARTUP_NOTIFY_AFTER: Duration = Duration::from_secs(5);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(15);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEALTH_FAILURES: u32 = 3;
@@ -74,6 +75,9 @@ struct LaunchSpec {
     restart_item: MenuItem<Wry>,
     auto_open: bool,
     record_path: Option<PathBuf>,
+    preflight_child: Arc<Mutex<Option<ManagedChild>>>,
+    preflight_active: Arc<AtomicBool>,
+    preflight_generation: Arc<AtomicU64>,
 }
 
 pub struct DshProcess {
@@ -88,9 +92,12 @@ pub struct DshProcess {
 }
 
 impl DshProcess {
-    /// 创建一个持续监督的 dsh。初次 spawn 失败也保留监督器，便于用户修好 PATH
-    /// 或配置后通过深链接 `dsh-launcher://start` 重新拉起。
+    /// 创建一个持续监督的 DSH Runner。初次 spawn 失败也保留监督器，便于用户修好
+    /// 外部 Node/pnpm PATH 或配置后通过深链接 `dsh-launcher://start` 重新拉起。
     pub fn spawn(options: DshSpawnOptions) -> Self {
+        let preflight_child = Arc::new(Mutex::new(None));
+        let preflight_active = Arc::new(AtomicBool::new(false));
+        let preflight_generation = Arc::new(AtomicU64::new(0));
         let spec = Arc::new(LaunchSpec {
             preferred_port: options.preferred_port,
             port_attempts: options.port_attempts,
@@ -107,6 +114,9 @@ impl DshProcess {
             restart_item: options.restart_item,
             auto_open: options.auto_open,
             record_path: options.record_path,
+            preflight_child: Arc::clone(&preflight_child),
+            preflight_active,
+            preflight_generation,
         });
         if let Some(path) = &spec.record_path {
             kill_stale_orphan(path);
@@ -125,14 +135,12 @@ impl DshProcess {
                 .unwrap_or_else(Instant::now),
         ));
 
-        if let Err(error) = spawn_child(&spec, &child, &ready_url, &generation, &browser_gate) {
-            spec.logs
-                .launcher
-                .log("watchdog", &format!("initial spawn failed: {error}"));
-            set_menu(&spec.open_item, "启动失败", false);
-            let status = format!("状态：启动失败 · {}", compact_reason(&error.to_string()));
-            set_status(&spec.status_item, &status);
-            set_controls(&spec, true, false, false);
+        if spec.config.lock().unwrap().needs_build_preflight() {
+            set_menu(&spec.open_item, "检查构建许可…", false);
+            set_status(&spec.status_item, "状态：检查构建许可…");
+            set_controls(&spec, false, true, true);
+        } else if let Err(error) = spawn_child(&spec, &child, &ready_url, &generation, &browser_gate) {
+            handle_spawn_error(&spec, &error);
         }
 
         let worker_spec = Arc::clone(&spec);
@@ -192,6 +200,7 @@ impl DshProcess {
         self.desired_running.store(false, Ordering::SeqCst);
         self.manual_start.store(false, Ordering::SeqCst);
         self.manual_restart.store(false, Ordering::SeqCst);
+        cancel_preflight(&self.spec);
         terminate_current(&self.child, &self.spec);
         clear_ready(&self.ready_url, &self.spec.open_item, &self.spec.copy_item);
         set_status(&self.spec.status_item, "状态：已停止");
@@ -216,6 +225,7 @@ impl DshProcess {
         self.manual_restart.store(true, Ordering::SeqCst);
         self.manual_start.store(true, Ordering::SeqCst);
         set_controls(&self.spec, false, true, true);
+        cancel_preflight(&self.spec);
         terminate_current(&self.child, &self.spec);
         clear_ready(&self.ready_url, &self.spec.open_item, &self.spec.copy_item);
         set_status(&self.spec.status_item, "状态：重启中…");
@@ -238,6 +248,7 @@ impl DshProcess {
     pub fn kill(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         self.desired_running.store(false, Ordering::SeqCst);
+        cancel_preflight(&self.spec);
         terminate_current(&self.child, &self.spec);
         remove_record(&self.spec.record_path);
     }
@@ -265,6 +276,7 @@ fn supervise(
     let mut started_at = Instant::now();
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
     let mut health_failures = 0;
+    let mut startup_notification_sent = false;
     let mut backoff_index = 0;
     let mut crash_times = VecDeque::new();
 
@@ -317,7 +329,14 @@ fn supervise(
         }
 
         if child.lock().unwrap().is_none() {
+            if spec.preflight_active.load(Ordering::SeqCst) {
+                continue;
+            }
             if Instant::now() < next_spawn {
+                continue;
+            }
+            if spec.config.lock().unwrap().needs_build_preflight() {
+                start_preflight(Arc::clone(&spec), Arc::clone(&desired_running));
                 continue;
             }
             match spawn_child(&spec, &child, &ready_url, &generation, &browser_gate) {
@@ -325,6 +344,7 @@ fn supervise(
                     started_at = now;
                     next_health = now + HEALTH_INTERVAL;
                     health_failures = 0;
+                    startup_notification_sent = false;
                 }
                 Err(error) => {
                     schedule_failure(
@@ -342,6 +362,14 @@ fn supervise(
         }
 
         if ready_url.lock().unwrap().is_none() {
+            if !startup_notification_sent && started_at.elapsed() >= STARTUP_NOTIFY_AFTER {
+                crate::tray::notify(
+                    &spec.app,
+                    "DSH Launcher",
+                    "DSH 仍在启动，完成后会自动打开浏览器。",
+                );
+                startup_notification_sent = true;
+            }
             if started_at.elapsed() >= STARTUP_TIMEOUT {
                 spec.logs
                     .launcher
@@ -452,6 +480,257 @@ fn schedule_failure(
         .log("watchdog", &format!("retry scheduled in {}s", delay.as_secs()));
 }
 
+fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
+    if spec.preflight_active.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let preflight_generation = spec.preflight_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    set_menu(&spec.open_item, "检查构建许可…", false);
+    set_status(&spec.status_item, "状态：检查构建许可…");
+    set_controls(&spec, false, true, true);
+    let worker_spec = Arc::clone(&spec);
+    thread::spawn(move || {
+        let result = run_preflight(&worker_spec);
+        if !is_current_preflight(&worker_spec, preflight_generation) {
+            return;
+        }
+        match result {
+            Ok(mut dependencies) => {
+                dependencies.sort();
+                dependencies.dedup();
+                if dependencies.is_empty() {
+                    approve_preflight(&worker_spec, &desired_running, dependencies, preflight_generation);
+                    return;
+                }
+                worker_spec.logs.launcher.log(
+                    "runner",
+                    &format!(
+                        "pnpm reported ignored build scripts for {}: {}",
+                        worker_spec.config.lock().unwrap().effective_runner().package,
+                        dependencies.join(", ")
+                    ),
+                );
+                let package = worker_spec.config.lock().unwrap().effective_runner().package;
+                let dialog_spec = Arc::clone(&worker_spec);
+                let dialog_desired = Arc::clone(&desired_running);
+                let approved_dependencies = dependencies.clone();
+                crate::tray::confirm_build_permissions(
+                    &worker_spec.app,
+                    &package,
+                    &dependencies,
+                    move |approved| {
+                        if !is_current_preflight(&dialog_spec, preflight_generation) {
+                            return;
+                        }
+                        if !dialog_desired.load(Ordering::SeqCst) {
+                            dialog_spec.preflight_active.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                        if approved {
+                            approve_preflight(
+                                &dialog_spec,
+                                &dialog_desired,
+                                approved_dependencies,
+                                preflight_generation,
+                            );
+                        } else {
+                            dialog_desired.store(false, Ordering::SeqCst);
+                            dialog_spec.preflight_active.store(false, Ordering::SeqCst);
+                            set_menu(&dialog_spec.open_item, "等待许可", false);
+                            set_status(&dialog_spec.status_item, "状态：等待构建许可");
+                            set_controls(&dialog_spec, true, false, false);
+                            dialog_spec
+                                .logs
+                                .launcher
+                                .log("runner", "build permission declined");
+                        }
+                    },
+                );
+            }
+            Err(error) => {
+                worker_spec.preflight_active.store(false, Ordering::SeqCst);
+                if !desired_running.load(Ordering::SeqCst) {
+                    return;
+                }
+                desired_running.store(false, Ordering::SeqCst);
+                set_menu(&worker_spec.open_item, "启动失败", false);
+                set_status(
+                    &worker_spec.status_item,
+                    &format!("状态：启动失败 · {}", compact_reason(&error)),
+                );
+                set_controls(&worker_spec, true, false, false);
+                worker_spec
+                    .logs
+                    .launcher
+                    .log("runner", &format!("preflight failed: {error}"));
+                crate::tray::show_startup_error(&worker_spec.app, &error);
+            }
+        }
+    });
+}
+
+fn approve_preflight(
+    spec: &Arc<LaunchSpec>,
+    desired_running: &AtomicBool,
+    dependencies: Vec<String>,
+    preflight_generation: u64,
+) {
+    if !is_current_preflight(spec, preflight_generation) {
+        return;
+    }
+    let package = spec.config.lock().unwrap().effective_runner().package;
+    let mut config = spec.config.lock().unwrap().clone();
+    if let Err(error) = config.persist_build_approval(&spec.config_path, &package, &dependencies) {
+        spec.preflight_active.store(false, Ordering::SeqCst);
+        desired_running.store(false, Ordering::SeqCst);
+        set_menu(&spec.open_item, "启动失败", false);
+        set_status(&spec.status_item, "状态：启动失败 · 无法保存构建许可");
+        set_controls(spec, true, false, false);
+        crate::tray::show_config_error(&spec.app, &spec.config_path, &error);
+        return;
+    }
+    *spec.config.lock().unwrap() = config;
+    spec.preflight_active.store(false, Ordering::SeqCst);
+    if desired_running.load(Ordering::SeqCst) {
+        set_menu(&spec.open_item, "启动中…", false);
+        set_status(&spec.status_item, "状态：启动中…");
+        set_controls(spec, false, true, true);
+        spec.logs
+            .launcher
+            .log("runner", &format!("build permissions approved for {package}"));
+    }
+}
+
+fn run_preflight(spec: &Arc<LaunchSpec>) -> Result<Vec<String>, String> {
+    let config = spec.config.lock().unwrap().clone();
+    let (executable, arguments) = config.runner_preflight_command()?;
+    let mut command = Command::new(&executable);
+    command
+        .args(&arguments)
+        .env_clear()
+        .envs(config.environment(&spec.home_dir))
+        .current_dir(&spec.home_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    spec.logs.launcher.log(
+        "runner",
+        &format!("preflight {executable} {}", arguments.join(" ")),
+    );
+    let mut process = ManagedChild::spawn(&mut command).map_err(|error| error.to_string())?;
+    let stdout = process.take_stdout().expect("stdout 已经设成 piped");
+    let stderr = process.take_stderr().expect("stderr 已经设成 piped");
+    let stdout_reader = thread::spawn(move || {
+        let mut output = String::new();
+        let mut reader = stdout;
+        let _ = reader.read_to_string(&mut output);
+        output
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = String::new();
+        let mut reader = stderr;
+        let _ = reader.read_to_string(&mut output);
+        output
+    });
+    *spec.preflight_child.lock().unwrap() = Some(process);
+
+    let status = loop {
+        let mut guard = spec.preflight_child.lock().unwrap();
+        let Some(process) = guard.as_mut() else {
+            return Err("预检进程已被停止".to_owned());
+        };
+        match process.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => return Err(format!("等待预检进程失败：{error}")),
+        }
+        drop(guard);
+        thread::sleep(Duration::from_millis(100));
+    };
+    let _ = spec.preflight_child.lock().unwrap().take();
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    let combined = format!("{stdout}\n{stderr}");
+    if !status.success() {
+        return Err(format!("pnpm 预检失败：{}", compact_reason(&combined)));
+    }
+    Ok(parse_ignored_build_scripts(&combined))
+}
+
+fn parse_ignored_build_scripts(output: &str) -> Vec<String> {
+    let mut collecting = false;
+    let mut dependencies = std::collections::BTreeSet::new();
+    for line in output.lines() {
+        if let Some(rest) = line.split_once("Ignored build scripts:").map(|(_, rest)| rest) {
+            collecting = true;
+            collect_package_tokens(rest, &mut dependencies);
+            continue;
+        }
+        if !collecting {
+            continue;
+        }
+        if line.contains("approve-builds") || line.contains('╰') {
+            break;
+        }
+        collect_package_tokens(line, &mut dependencies);
+    }
+    dependencies.into_iter().collect()
+}
+
+fn collect_package_tokens(line: &str, dependencies: &mut std::collections::BTreeSet<String>) {
+    for token in line.split_whitespace() {
+        let token = token.trim_matches(|character: char| {
+            matches!(character, '│' | '╭' | '╰' | '╮' | '╯' | ',' | ':' | ';')
+        });
+        let token = token.trim_end_matches('.');
+        let package_name = token
+            .char_indices()
+            .skip(1)
+            .find(|(_, character)| *character == '@')
+            .map_or(token, |(index, _)| &token[..index]);
+        if !package_name.is_empty()
+            && package_name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '@' | '/' | '_' | '-' | '.' | '#')
+            })
+            && (package_name.starts_with('@')
+                || package_name
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphabetic()))
+        {
+            dependencies.insert(package_name.to_owned());
+        }
+    }
+}
+
+fn handle_spawn_error(spec: &LaunchSpec, error: &std::io::Error) {
+    spec.logs
+        .launcher
+        .log("watchdog", &format!("initial spawn failed: {error}"));
+    set_menu(&spec.open_item, "启动失败", false);
+    let status = format!("状态：启动失败 · {}", compact_reason(&error.to_string()));
+    set_status(&spec.status_item, &status);
+    set_controls(spec, true, false, false);
+    crate::tray::show_startup_error(&spec.app, &error.to_string());
+}
+
+fn terminate_preflight(preflight_child: &Arc<Mutex<Option<ManagedChild>>>) {
+    if let Some(mut current) = preflight_child.lock().unwrap().take() {
+        current.terminate();
+    }
+}
+
+fn cancel_preflight(spec: &Arc<LaunchSpec>) {
+    spec.preflight_generation.fetch_add(1, Ordering::SeqCst);
+    spec.preflight_active.store(false, Ordering::SeqCst);
+    terminate_preflight(&spec.preflight_child);
+}
+
+fn is_current_preflight(spec: &LaunchSpec, generation: u64) -> bool {
+    spec.preflight_active.load(Ordering::SeqCst)
+        && spec.preflight_generation.load(Ordering::SeqCst) == generation
+}
+
 fn spawn_child(
     spec: &LaunchSpec,
     child_cell: &Arc<Mutex<Option<ManagedChild>>>,
@@ -470,12 +749,10 @@ fn spawn_child(
             return Err(error);
         }
     };
-    let arguments = config.arguments(port, &spec.home_dir);
-    let (executable, entry) = config.runtime_command();
+    let (executable, arguments) = config
+        .launch_command(port, &spec.home_dir)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let mut command = Command::new(&executable);
-    if let Some(entry) = entry {
-        command.arg(entry);
-    }
     command
         .args(&arguments)
         .env_clear()
@@ -487,7 +764,11 @@ fn spawn_child(
 
     spec.logs.launcher.log(
         "launcher",
-        &format!("spawning {executable} profile={} port={port}", config.profile()),
+        &format!(
+            "spawning {executable} {} profile={} port={port}",
+            arguments.join(" "),
+            config.profile()
+        ),
     );
     let mut process = ManagedChild::spawn(&mut command)?;
     if let Some(path) = &spec.record_path {
@@ -532,6 +813,11 @@ fn spawn_child(
                 let _ = watcher_copy.set_enabled(true);
                 let _ =
                     watcher_status.set_text(format!("状态：运行中 · 端口 {}", url.port().unwrap_or(port)));
+                crate::tray::notify(
+                    &watcher_app,
+                    "DSH 已就绪",
+                    &format!("本地服务已启动，端口 {}。", url.port().unwrap_or(port)),
+                );
                 launcher_log.log(
                     "launcher",
                     &format!("dsh ready port={}", url.port().unwrap_or(port)),
@@ -743,7 +1029,13 @@ mod tests {
 
     #[test]
     fn probes_forward_ports() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = loop {
+            let candidate = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = candidate.local_addr().unwrap().port();
+            if port < u16::MAX && TcpListener::bind(("127.0.0.1", port + 1)).is_ok() {
+                break candidate;
+            }
+        };
         let occupied = listener.local_addr().unwrap().port();
         let selected = first_available_port(occupied, 2).unwrap();
         assert!(selected > occupied);
@@ -764,5 +1056,26 @@ mod tests {
         let url = Url::parse(&format!("http://127.0.0.1:{port}/?token=test")).unwrap();
         assert!(health_check(&url));
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn parses_pnpm_ignored_build_script_warning() {
+        let output = r#"
+╭ Warning ─────────────────────────────────────────────────────────────────────╮
+│ Ignored build scripts: @deepseek-ai/dsh-subprocess-local@0.1.5-rc.2,         │
+│ @google/genai@1.52.0, koffi@3.3.1, node-pty@1.2.0-beta.15, protobufjs@7.6.6 │
+│ Run "pnpm approve-builds" to pick which dependencies should be allowed       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+"#;
+        assert_eq!(
+            parse_ignored_build_scripts(output),
+            vec![
+                "@deepseek-ai/dsh-subprocess-local",
+                "@google/genai",
+                "koffi",
+                "node-pty",
+                "protobufjs"
+            ]
+        );
     }
 }
