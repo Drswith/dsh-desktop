@@ -1,7 +1,7 @@
 //! DSH Launcher：托盘里跑一个本地 dsh Web Profile，就绪后在默认浏览器里打开它。
 //!
 //! 范围刻意控制在托盘启动器，但已经包含 dsh 看门狗、深链接、持久化配置和登录启动。
-//! 运行时安装、多语言和 Dock 菜单这些 Swift 版本原有的功能仍未搬过来（参见仓库 README）。
+//! 运行时安装、多语言和 Dock 右键菜单这些 Swift 版本原有的功能仍未搬过来（参见仓库 README）。
 //! 托盘和菜单用的是
 //! Tauri 自带的 `tray`/`menu` 模块，浏览器打开、配置和日志是跨平台 Rust 实现，
 //! 没有直接调用任何 macOS-only 的 AppKit API，因此可以跨平台编译——但目前只
@@ -14,6 +14,8 @@ mod process_tree;
 mod ready_line;
 mod tray;
 
+#[cfg(target_os = "macos")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -69,12 +71,18 @@ pub fn run() {
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false)
             });
+            let launch_at_login_enabled = configure_launch_at_login_on_first_run(
+                app.handle(),
+                &preferences,
+                &logs.launcher,
+                launch_at_login_enabled,
+            );
             let handles = tray::build(app.handle(), launch_at_login_enabled)?;
-            let config = match config::ShellConfig::load(&paths.config) {
-                Ok(config) => config,
+            let (config, config_error) = match config::ShellConfig::load(&paths.config) {
+                Ok(config) => (config, None),
                 Err(error) => {
                     logs.launcher.log("launcher", &error);
-                    config::ShellConfig::default()
+                    (config::ShellConfig::default(), Some(error))
                 }
             };
             logs.launcher.log(
@@ -99,6 +107,7 @@ pub fn run() {
                 home_dir,
                 logs,
                 app: app.handle().clone(),
+                status_item: handles.status_item.clone(),
                 open_item: handles.open_item.clone(),
                 copy_item: handles.copy_item.clone(),
                 start_item: handles.start_item.clone(),
@@ -112,6 +121,11 @@ pub fn run() {
                 preferences,
                 quit_dialog_open: AtomicBool::new(false),
             });
+
+            tray::refresh_runtime_summary(app.handle(), handles.runtime_item.clone());
+            if let Some(error) = config_error {
+                tray::show_config_error(app.handle(), &paths.config, &error);
+            }
 
             let app_handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -139,6 +153,42 @@ pub fn run() {
                 }
             }
         });
+}
+
+fn configure_launch_at_login_on_first_run(
+    app: &AppHandle,
+    preferences: &Arc<Store<Wry>>,
+    log: &logging::LogFile,
+    current: bool,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    if !preferences.has("configuredLaunchAtLogin") && is_stable_install_location() {
+        // 和 Swift 版一致：只在稳定安装位置的第一次启动处理一次，开发目录不改
+        // 用户登录项；即使系统 API 失败也记录已配置，避免每次启动重复尝试。
+        preferences.set("configuredLaunchAtLogin", true);
+        let _ = preferences.save();
+        match app.autolaunch().enable() {
+            Ok(()) => {
+                log.log("launcher", "launch at login enabled on first run");
+                return app.autolaunch().is_enabled().unwrap_or(true);
+            }
+            Err(error) => log.log(
+                "launcher",
+                &format!("enable launch at login on first run failed: {error}"),
+            ),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, preferences, log);
+    current
+}
+
+#[cfg(target_os = "macos")]
+fn is_stable_install_location() -> bool {
+    std::env::current_exe().ok().is_some_and(|path| {
+        path.ancestors()
+            .any(|ancestor| ancestor == Path::new("/Applications"))
+    })
 }
 
 fn handle_deep_link(app: &AppHandle, url: &Url) {

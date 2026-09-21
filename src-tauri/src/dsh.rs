@@ -47,6 +47,7 @@ pub struct DshSpawnOptions {
     pub home_dir: PathBuf,
     pub logs: LogFiles,
     pub app: AppHandle,
+    pub status_item: MenuItem<Wry>,
     pub open_item: MenuItem<Wry>,
     pub copy_item: MenuItem<Wry>,
     pub start_item: MenuItem<Wry>,
@@ -65,6 +66,7 @@ struct LaunchSpec {
     home_dir: PathBuf,
     logs: LogFiles,
     app: AppHandle,
+    status_item: MenuItem<Wry>,
     open_item: MenuItem<Wry>,
     copy_item: MenuItem<Wry>,
     start_item: MenuItem<Wry>,
@@ -97,6 +99,7 @@ impl DshProcess {
             home_dir: options.home_dir,
             logs: options.logs,
             app: options.app,
+            status_item: options.status_item,
             open_item: options.open_item,
             copy_item: options.copy_item,
             start_item: options.start_item,
@@ -127,6 +130,8 @@ impl DshProcess {
                 .launcher
                 .log("watchdog", &format!("initial spawn failed: {error}"));
             set_menu(&spec.open_item, "启动失败", false);
+            let status = format!("状态：启动失败 · {}", compact_reason(&error.to_string()));
+            set_status(&spec.status_item, &status);
             set_controls(&spec, true, false, false);
         }
 
@@ -189,6 +194,7 @@ impl DshProcess {
         self.manual_restart.store(false, Ordering::SeqCst);
         terminate_current(&self.child, &self.spec);
         clear_ready(&self.ready_url, &self.spec.open_item, &self.spec.copy_item);
+        set_status(&self.spec.status_item, "状态：已停止");
         remove_record(&self.spec.record_path);
         set_controls(&self.spec, true, false, false);
         let _ = self.spec.copy_item.set_enabled(false);
@@ -198,11 +204,13 @@ impl DshProcess {
     pub fn restart(&self) {
         match ShellConfig::load(&self.spec.config_path) {
             Ok(config) => *self.spec.config.lock().unwrap() = config,
-            Err(error) => self
-                .spec
-                .logs
-                .launcher
-                .log("launcher", &format!("reload config failed: {error}")),
+            Err(error) => {
+                self.spec
+                    .logs
+                    .launcher
+                    .log("launcher", &format!("reload config failed: {error}"));
+                crate::tray::show_config_error(&self.spec.app, &self.spec.config_path, &error);
+            }
         }
         self.desired_running.store(true, Ordering::SeqCst);
         self.manual_restart.store(true, Ordering::SeqCst);
@@ -210,6 +218,7 @@ impl DshProcess {
         set_controls(&self.spec, false, true, true);
         terminate_current(&self.child, &self.spec);
         clear_ready(&self.ready_url, &self.spec.open_item, &self.spec.copy_item);
+        set_status(&self.spec.status_item, "状态：重启中…");
         remove_record(&self.spec.record_path);
         self.spec
             .logs
@@ -400,6 +409,7 @@ fn schedule_failure(
     spec.logs.launcher.log("watchdog", reason);
     if !desired_running.load(Ordering::SeqCst) {
         set_menu(&spec.open_item, "已停止", false);
+        set_status(&spec.status_item, "状态：已停止");
         set_controls(spec, true, false, false);
         return;
     }
@@ -407,6 +417,7 @@ fn schedule_failure(
         *next_spawn = Instant::now();
         *backoff_index = 0;
         set_menu(&spec.open_item, "启动中…", false);
+        set_status(&spec.status_item, "状态：启动中…");
         set_controls(spec, false, true, true);
         return;
     }
@@ -422,6 +433,8 @@ fn schedule_failure(
     if crash_times.len() >= 5 {
         desired_running.store(false, Ordering::SeqCst);
         set_menu(&spec.open_item, "启动失败", false);
+        let status = format!("状态：启动失败 · {}", compact_reason(reason));
+        set_status(&spec.status_item, &status);
         set_controls(spec, true, false, false);
         spec.logs.launcher.log("watchdog", "crash circuit breaker opened");
         return;
@@ -431,6 +444,8 @@ fn schedule_failure(
     *backoff_index = (*backoff_index + 1).min(RESTART_BACKOFF.len() - 1);
     *next_spawn = now + delay;
     set_menu(&spec.open_item, "重启中…", false);
+    let status = format!("状态：重启中… · {}", compact_reason(reason));
+    set_status(&spec.status_item, &status);
     set_controls(spec, false, true, true);
     spec.logs
         .launcher
@@ -489,6 +504,7 @@ fn spawn_child(
     let this_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
     *ready_url.lock().unwrap() = None;
     set_menu(&spec.open_item, "启动中…", false);
+    set_status(&spec.status_item, "状态：启动中…");
     set_controls(spec, false, true, true);
     *child_cell.lock().unwrap() = Some(process);
 
@@ -498,6 +514,7 @@ fn spawn_child(
     let watcher_app = spec.app.clone();
     let watcher_item = spec.open_item.clone();
     let watcher_copy = spec.copy_item.clone();
+    let watcher_status = spec.status_item.clone();
     let watcher_log = spec.logs.dsh.clone();
     let launcher_log = spec.logs.launcher.clone();
     let auto_open = spec.auto_open;
@@ -513,6 +530,8 @@ fn spawn_child(
                 let _ = watcher_item.set_text("打开 DSH");
                 let _ = watcher_item.set_enabled(true);
                 let _ = watcher_copy.set_enabled(true);
+                let _ =
+                    watcher_status.set_text(format!("状态：运行中 · 端口 {}", url.port().unwrap_or(port)));
                 launcher_log.log(
                     "launcher",
                     &format!("dsh ready port={}", url.port().unwrap_or(port)),
@@ -546,6 +565,19 @@ fn clear_ready(ready_url: &Arc<Mutex<Option<Url>>>, open_item: &MenuItem<Wry>, c
     *ready_url.lock().unwrap() = None;
     set_menu(open_item, "启动中…", false);
     let _ = copy_item.set_enabled(false);
+}
+
+fn compact_reason(reason: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    let mut result = reason.chars().take(MAX_CHARS).collect::<String>();
+    if reason.chars().count() > MAX_CHARS {
+        result.push('…');
+    }
+    result
+}
+
+fn set_status(item: &MenuItem<Wry>, text: &str) {
+    let _ = item.set_text(text);
 }
 
 fn remove_record(record_path: &Option<PathBuf>) {

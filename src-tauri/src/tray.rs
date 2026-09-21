@@ -2,8 +2,8 @@
 //! 弹一个确认框，确认后才真的退出。
 //!
 //! 用的都是 Tauri 自带的 `tray`/`menu` 模块、官方 `tauri-plugin-opener` 和
-//! `tauri-plugin-dialog`，没有直接调用任何平台原生 API——Dock 右键菜单这类纯
-//! macOS 概念暂时没有实现。
+//! `tauri-plugin-dialog`；Dock 显示策略也通过 Tauri 的跨平台抽象设置。Dock
+//! 右键菜单这类纯 macOS 菜单仍未实现。
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -23,6 +23,8 @@ use crate::AppState;
 
 /// 菜单建好之后，`lib.rs` 还需要用到「打开 DSH」项；其余动作直接在这里分发。
 pub struct TrayHandles {
+    pub status_item: MenuItem<Wry>,
+    pub runtime_item: MenuItem<Wry>,
     pub open_item: MenuItem<Wry>,
     pub copy_item: MenuItem<Wry>,
     pub start_item: MenuItem<Wry>,
@@ -31,6 +33,8 @@ pub struct TrayHandles {
 }
 
 pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<TrayHandles> {
+    let status_item = MenuItem::with_id(app, "status", "状态：启动中…", false, None::<&str>)?;
+    let runtime_item = MenuItem::with_id(app, "runtime", "运行时：读取中…", false, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open", "启动中…", false, None::<&str>)?;
     let copy_item = MenuItem::with_id(app, "copy", "复制访问链接", false, None::<&str>)?;
     let start_item = MenuItem::with_id(app, "start", "启动", true, None::<&str>)?;
@@ -48,11 +52,22 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
         launch_at_login_enabled,
         None::<&str>,
     )?;
+    let dock_item = CheckMenuItem::with_id(
+        app,
+        "dock-icon",
+        "隐藏 Dock 图标",
+        cfg!(target_os = "macos"),
+        true,
+        None::<&str>,
+    )?;
     let about_item = MenuItem::with_id(app, "about", "关于 DSH Launcher", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
+            &status_item,
+            &runtime_item,
+            &PredefinedMenuItem::separator(app)?,
             &open_item,
             &copy_item,
             &PredefinedMenuItem::separator(app)?,
@@ -65,6 +80,7 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
             &dsh_home_item,
             &login_items_item,
             &launch_at_login_item,
+            &dock_item,
             &PredefinedMenuItem::separator(app)?,
             &about_item,
             &quit_item,
@@ -100,6 +116,7 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
     app.set_menu(Menu::with_items(app, &[&app_menu, &edit_menu])?)?;
 
     let launch_at_login_for_events = launch_at_login_item.clone();
+    let dock_for_events = dock_item.clone();
     let mut builder = TrayIconBuilder::with_id("main")
         .icon(tray_icon())
         .menu(&menu)
@@ -107,6 +124,8 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
         .on_menu_event(move |app, event| {
             if event.id().as_ref() == "launch-at-login" {
                 toggle_launch_at_login(app, &launch_at_login_for_events);
+            } else if event.id().as_ref() == "dock-icon" {
+                toggle_dock_icon(app, &dock_for_events);
             } else {
                 handle_menu_event(app, event.id().as_ref());
             }
@@ -122,6 +141,8 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
     builder.build(app)?;
 
     Ok(TrayHandles {
+        status_item,
+        runtime_item,
         open_item,
         copy_item,
         start_item,
@@ -173,12 +194,25 @@ fn open_config(app: &AppHandle) {
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let path = crate::config::AppPaths::new(home).config;
     if let Err(error) = crate::config::ShellConfig::ensure_file(&path) {
-        eprintln!("创建配置文件失败：{error}");
+        show_config_error(app, &path, &error);
         return;
     }
     if let Err(error) = app.opener().open_path(path.display().to_string(), None::<&str>) {
-        eprintln!("打开配置文件失败：{error}");
+        show_config_error(app, &path, &format!("打开配置文件失败：{error}"));
     }
+}
+
+pub(crate) fn show_config_error(app: &AppHandle, path: &std::path::Path, error: &str) {
+    app.dialog()
+        .message(format!(
+            "无法读取配置文件：{}\n\n{}\n\n将继续使用默认配置。",
+            path.display(),
+            error
+        ))
+        .title("配置错误")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(|_| {});
 }
 
 pub(crate) fn open_logs(app: &AppHandle) {
@@ -250,26 +284,23 @@ pub(crate) fn show_about(app: &AppHandle) {
     });
 }
 
+pub(crate) fn refresh_runtime_summary(app: &AppHandle, item: MenuItem<Wry>) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let summary = runtime_summary(&app);
+        let _ = app.run_on_main_thread(move || {
+            let _ = item.set_text(summary);
+        });
+    });
+}
+
 fn about_details(app: &AppHandle) -> String {
     let home = app
         .path()
         .home_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let paths = crate::config::AppPaths::new(home.clone());
-    let config = crate::config::ShellConfig::load(&paths.config).unwrap_or_default();
-    let environment = config.environment(&home);
-    let node_program = config
-        .runtime
-        .as_ref()
-        .and_then(|runtime| runtime.node.as_deref())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("node");
-    let dsh_version =
-        command_version("dsh", &["--version"], &environment).unwrap_or_else(|| "未找到 dsh 命令".to_owned());
-    let node_version = command_version(node_program, &["--version"], &environment)
-        .unwrap_or_else(|| "未找到 node 命令".to_owned());
-    let pnpm_version = command_version("pnpm", &["--version"], &environment)
-        .unwrap_or_else(|| "未找到 pnpm 命令".to_owned());
+    let (dsh_version, node_version, pnpm_version) = runtime_versions(&home, &paths.config);
     let commit = env!("DSH_LAUNCHER_GIT_COMMIT");
     let build_date = if env!("DSH_LAUNCHER_BUILD_DATE").is_empty() {
         "未知"
@@ -289,6 +320,34 @@ fn about_details(app: &AppHandle) -> String {
         std::env::consts::OS,
         std::env::consts::ARCH
     )
+}
+
+fn runtime_versions(home: &std::path::Path, config_path: &std::path::Path) -> (String, String, String) {
+    let config = crate::config::ShellConfig::load(config_path).unwrap_or_default();
+    let environment = config.environment(home);
+    let node_program = config
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.node.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("node");
+    let dsh_version =
+        command_version("dsh", &["--version"], &environment).unwrap_or_else(|| "未找到 dsh 命令".to_owned());
+    let node_version = command_version(node_program, &["--version"], &environment)
+        .unwrap_or_else(|| "未找到 node 命令".to_owned());
+    let pnpm_version = command_version("pnpm", &["--version"], &environment)
+        .unwrap_or_else(|| "未找到 pnpm 命令".to_owned());
+    (dsh_version, node_version, pnpm_version)
+}
+
+fn runtime_summary(app: &AppHandle) -> String {
+    let home = app
+        .path()
+        .home_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let paths = crate::config::AppPaths::new(home.clone());
+    let (dsh, node, pnpm) = runtime_versions(&home, &paths.config);
+    format!("运行时：外部 · DSH {dsh} · Node.js {node} · pnpm {pnpm}")
 }
 
 fn show_about_dialog(app: &AppHandle, details: String) {
@@ -370,6 +429,39 @@ fn toggle_launch_at_login(app: &AppHandle, item: &CheckMenuItem<Wry>) {
                 .kind(MessageDialogKind::Error)
                 .show(|_| {});
         }
+    }
+}
+
+fn toggle_dock_icon(app: &AppHandle, item: &CheckMenuItem<Wry>) {
+    #[cfg(target_os = "macos")]
+    {
+        let currently_visible = item.is_checked().unwrap_or(true);
+        let policy = if currently_visible {
+            tauri::ActivationPolicy::Accessory
+        } else {
+            tauri::ActivationPolicy::Regular
+        };
+        match app.set_activation_policy(policy) {
+            Ok(()) => {
+                let _ = item.set_checked(!currently_visible);
+                let _ = item.set_text(if currently_visible {
+                    "显示 Dock 图标"
+                } else {
+                    "隐藏 Dock 图标"
+                });
+            }
+            Err(error) => {
+                app.dialog()
+                    .message(format!("无法更新 Dock 图标显示设置：{error}"))
+                    .title("Dock 图标")
+                    .kind(MessageDialogKind::Error)
+                    .show(|_| {});
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, item);
     }
 }
 

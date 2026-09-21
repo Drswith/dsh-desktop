@@ -96,7 +96,26 @@ impl ShellConfig {
     }
 
     pub fn template_json() -> String {
-        serde_json::to_string_pretty(&Self::default()).unwrap_or_else(|_| "{}".to_owned()) + "\n"
+        // `_comment` 会被 serde 忽略，保留在文件里是为了让第一次打开配置的
+        // 用户知道每个字段的作用；runtime 明确保持 null，避免误把 dsh 当成
+        // Node entry 传给自定义运行时。
+        r#"{
+  "_comment": "DSH Launcher 配置。修改后选择“重启”生效；启动器不会安装或升级 runtime。",
+  "_comment_port": "监听端口；被占用时会按顺序向后尝试最多 20 个端口。",
+  "port": 31080,
+  "_comment_profile": "dsh profile 名称；默认 launcher。",
+  "profile": "launcher",
+  "_comment_dshHome": "DSH 数据目录；支持 ~ 和 ~/relative/path。",
+  "dshHome": "~/.dsh",
+  "_comment_extraArgs": "追加到 dsh 命令末尾的参数。",
+  "extraArgs": [],
+  "_comment_environment": "传给 dsh 的额外环境变量，会覆盖登录 shell 环境。",
+  "environment": {},
+  "_comment_runtime": "可选外部运行时，例如 {\"node\":\"/path/to/node\",\"entry\":\"/path/to/dsh.js\"}。",
+  "runtime": null
+}
+"#
+        .to_owned()
     }
 
     pub fn ensure_file(path: &Path) -> Result<(), String> {
@@ -236,5 +255,15 @@ mod tests {
             config.runtime_command(),
             ("/usr/local/bin/node".to_owned(), Some("/tmp/dsh.js".to_owned()))
         );
+    }
+
+    #[test]
+    fn template_is_documented_and_loadable() {
+        let template = ShellConfig::template_json();
+        let config: ShellConfig = serde_json::from_str(&template).unwrap();
+        assert_eq!(config.port, Some(31080));
+        assert_eq!(config.profile(), "launcher");
+        assert!(config.runtime.is_none());
+        assert!(template.contains("不会安装或升级 runtime"));
     }
 }
