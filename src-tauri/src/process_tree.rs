@@ -5,7 +5,7 @@
 //! Windows 会把 Job 中的进程一起终止，覆盖启动器崩溃的场景。
 
 use std::io;
-use std::process::{Child, ChildStdout, Command};
+use std::process::{Child, ChildStderr, ChildStdout, Command};
 
 pub struct ManagedChild {
     child: Child,
@@ -31,6 +31,14 @@ impl ManagedChild {
 
     pub fn take_stdout(&mut self) -> Option<ChildStdout> {
         self.child.stdout.take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
     }
 
     /// 先优雅终止，超时后强制终止整个进程树。

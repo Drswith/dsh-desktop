@@ -26,6 +26,14 @@ pub(crate) fn authenticated_url(line: &str) -> Option<Url> {
     has_token.then_some(url)
 }
 
+/// 去掉 token，供日志和状态展示使用。
+pub(crate) fn clean_url(url: &Url) -> Url {
+    let mut clean = url.clone();
+    clean.set_query(None);
+    clean.set_fragment(None);
+    clean
+}
+
 fn utf8_len(first: u8) -> usize {
     match first {
         0x00..=0x7F => 1,
