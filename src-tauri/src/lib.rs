@@ -30,11 +30,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 纯托盘应用，没有窗口；macOS 上不设这个会在 Dock 和 Cmd+Tab
-            // 里多出一个没有窗口可显示的图标。
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             let handles = tray::build(app.handle())?;
 
             let dsh_process = match dsh::DshProcess::spawn(DEFAULT_PORT, handles.open_item.clone()) {
