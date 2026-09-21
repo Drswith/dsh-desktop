@@ -4,19 +4,18 @@
 [tools]
 # Tauri 外壳用 Rust 构建，版本固定，CI 与本机一致。
 rust = "1.89"
-# 只用来跑官方 @tauri-apps/cli（一个 JS 包）；和 dsh 运行时无关。
-node = "22"
-pnpm = "10"
+# 官方 Rust CLI；Node.js/pnpm 只属于外部 DSH Runner，不属于构建链路。
+"cargo:tauri-cli" = "2.11.5"
 
 [tasks.dev]
-description = "开发模式启动（热重载，自动装前端依赖）"
+description = "开发模式启动"
 dir = "{{config_root}}"
-run = "pnpm install && pnpm tauri dev"
+run = "cargo tauri dev"
 
 [tasks.build]
 description = "出正式包（.app / .dmg 等，产物在 src-tauri/target/release/bundle）"
 dir = "{{config_root}}"
-run = "pnpm install && pnpm tauri build"
+run = "cargo tauri build"
 
 [tasks.test]
 description = "单元测试"
@@ -29,6 +28,6 @@ dir = "{{config_root}}/src-tauri"
 run = ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings"]
 
 [tasks.clean]
-description = "清掉构建产物和依赖缓存"
+description = "清掉构建产物"
 dir = "{{config_root}}"
-run = "rm -rf node_modules src-tauri/target src-tauri/gen"
+run = "rm -rf src-tauri/target src-tauri/gen"
