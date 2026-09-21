@@ -2,5 +2,9 @@
 /node_modules/
 /src-tauri/target/
 /src-tauri/gen/
+/.build/
+/.cache/
+/build/
+/signing.local.env
 
 .DS_Store
