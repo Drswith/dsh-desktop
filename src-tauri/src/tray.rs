@@ -1,11 +1,16 @@
-//! 托盘图标 + 菜单：「打开 DSH」在 dsh 就绪前是禁用的「启动中…」，「退出」直接退出。
+//! 托盘图标 + 菜单：「打开 DSH」在 dsh 就绪前是禁用的「启动中…」，「退出」会先
+//! 弹一个确认框，确认后才真的退出。
 //!
-//! 用的都是 Tauri 自带的 `tray`/`menu` 模块和官方 `tauri-plugin-opener`，没有直接
-//! 调用任何平台原生 API——Dock 右键菜单这类纯 macOS 概念暂时没有实现。
+//! 用的都是 Tauri 自带的 `tray`/`menu` 模块、官方 `tauri-plugin-opener` 和
+//! `tauri-plugin-dialog`，没有直接调用任何平台原生 API——Dock 右键菜单这类纯
+//! macOS 概念暂时没有实现。
+
+use std::sync::atomic::Ordering;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{image::Image, AppHandle, Manager, Wry};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::AppState;
@@ -44,7 +49,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                 };
                 let _ = app.opener().open_url(url, None::<&str>);
             }
-            "quit" => app.exit(0),
+            "quit" => confirm_quit(app),
             _ => {}
         });
 
@@ -58,6 +63,43 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     builder.build(app)?;
 
     Ok(TrayHandles { open_item })
+}
+
+/// 弹确认框，确认了才真的退出。用的是非阻塞的 `.show(回调)`：这个事件处理本身
+/// 就在主线程上跑，阻塞版 `blocking_show()` 的文档明确说了不能在主线程调用——
+/// 之前手写 AppKit 弹窗时在主线程同步等过一次，直接死锁，这次不重蹈覆辙。
+///
+/// 已经有一个确认框在等用户点的时候，再点一次「退出」不会再弹一个——手工测试
+/// 时真的连点出来过好几个摞在一起的确认框，不是假设的场景。
+fn confirm_quit(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if state
+        .quit_dialog_open
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return; // 已经有一个框在等着了，不用再弹一个
+    }
+
+    let app = app.clone();
+    app.dialog()
+        .message("dsh 服务也会一起停止。")
+        .title("退出 DSH Launcher？")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "退出".to_string(),
+            "取消".to_string(),
+        ))
+        .show(move |confirmed| {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.quit_dialog_open.store(false, Ordering::SeqCst);
+            }
+            if confirmed {
+                app.exit(0);
+            }
+        });
 }
 
 /// 内置的托盘图标：macOS 用沿用自 Swift 版的模板图，其它平台用带色的方形图标。

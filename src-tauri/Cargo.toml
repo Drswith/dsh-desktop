@@ -25,8 +25,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
+# 退出确认弹窗。
+tauri-plugin-dialog = "2"
 # 只用来解析 `dsh web` 就绪行里的地址（core:default 权限不需要它，纯 Rust 内部用）。
 url = "2"
+# 启动时按 pid 找上次遗留的孤儿 dsh 进程；只要进程查询/kill 这一小块，关掉
+# 磁盘/网络/组件之类用不到的模块。
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 
 [profile.release]
 codegen-units = 1
