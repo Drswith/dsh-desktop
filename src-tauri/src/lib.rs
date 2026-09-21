@@ -1,7 +1,7 @@
 //! DSH Launcher：托盘里跑一个本地 dsh Web Profile，就绪后在默认浏览器里打开它。
 //!
-//! 范围刻意控制在托盘启动器，但已经包含 dsh 看门狗、深链接和持久化配置。运行时
-//! 安装、登录启动、多语言这些 Swift 版本原有的功能仍未搬过来（参见仓库 README）。
+//! 范围刻意控制在托盘启动器，但已经包含 dsh 看门狗、深链接、持久化配置和登录启动。
+//! 运行时安装、多语言和 Dock 菜单这些 Swift 版本原有的功能仍未搬过来（参见仓库 README）。
 //! 托盘和菜单用的是
 //! Tauri 自带的 `tray`/`menu` 模块，浏览器打开、配置和日志是跨平台 Rust 实现，
 //! 没有直接调用任何 macOS-only 的 AppKit API，因此可以跨平台编译——但目前只
@@ -16,11 +16,12 @@ mod tray;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Wry};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutoStartManagerExt};
 use tauri_plugin_deep_link::DeepLinkExt;
-use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_store::{Store, StoreExt};
 use url::Url;
 
 /// Swift 版的默认端口和顺延窗口。
@@ -31,6 +32,8 @@ const PORT_ATTEMPTS: u16 = 20;
 pub struct AppState {
     /// dsh Web Profile 子进程（如果启动成功的话）。
     dsh: Mutex<Option<dsh::DshProcess>>,
+    /// Swift `NSUserDefaults` 的最小替代：保存退出确认和登录启动偏好。
+    preferences: Arc<Store<Wry>>,
     /// 退出确认框是不是已经弹出来了——连点几下托盘「退出」不该堆出好几个框。
     quit_dialog_open: AtomicBool,
 }
@@ -50,11 +53,23 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .on_menu_event(|app, event| tray::handle_menu_event(app, event.id().as_ref()))
         .setup(|app| {
             let home_dir = app.path().home_dir().unwrap_or_else(|_| PathBuf::from("."));
             let paths = config::AppPaths::new(home_dir.clone());
             let logs = logging::LogFiles::new(&paths.logs);
-            let handles = tray::build(app.handle())?;
+            let preferences = app.store(paths.preferences.clone())?;
+            let launch_at_login_enabled = app.autolaunch().is_enabled().unwrap_or_else(|error| {
+                logs.launcher
+                    .log("launcher", &format!("读取登录启动状态失败：{error}"));
+                preferences
+                    .get("launchAtLogin")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            });
+            let handles = tray::build(app.handle(), launch_at_login_enabled)?;
             let config = match config::ShellConfig::load(&paths.config) {
                 Ok(config) => config,
                 Err(error) => {
@@ -94,6 +109,7 @@ pub fn run() {
             });
             app.manage(AppState {
                 dsh: Mutex::new(Some(dsh_process)),
+                preferences,
                 quit_dialog_open: AtomicBool::new(false),
             });
 
@@ -135,6 +151,10 @@ fn handle_deep_link(app: &AppHandle, url: &Url) {
         .or_else(|| url.path_segments().and_then(|mut segments| segments.next()))
         .unwrap_or("open")
         .to_ascii_lowercase();
+    if action == "logs" {
+        tray::open_logs(app);
+        return;
+    }
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
@@ -145,13 +165,6 @@ fn handle_deep_link(app: &AppHandle, url: &Url) {
         "start" => dsh.start(),
         "stop" => dsh.stop(),
         "restart" => dsh.restart(),
-        "logs" => {
-            let home = app.path().home_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let path = config::AppPaths::new(home).logs;
-            if let Err(error) = app.opener().open_path(path.display().to_string(), None::<&str>) {
-                eprintln!("打开日志目录失败：{error}");
-            }
-        }
         _ => {}
     }
 }

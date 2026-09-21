@@ -28,6 +28,9 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 # 退出确认弹窗。
 tauri-plugin-dialog = "2"
+# 登录启动和轻量用户偏好。
+tauri-plugin-autostart = "2.0.1"
+tauri-plugin-store = "2.2.0"
 # 只用来解析 `dsh web` 就绪行里的地址（core:default 权限不需要它，纯 Rust 内部用）。
 url = "2"
 serde = { version = "1", features = ["derive"] }

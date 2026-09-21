@@ -170,6 +170,7 @@ fn login_environment() -> BTreeMap<String, String> {
 pub struct AppPaths {
     pub config: PathBuf,
     pub logs: PathBuf,
+    pub preferences: PathBuf,
 }
 
 impl AppPaths {
@@ -178,6 +179,7 @@ impl AppPaths {
         Self {
             config: root.join("config.json"),
             logs: root.join("logs"),
+            preferences: root.join("preferences.json"),
         }
     }
 }

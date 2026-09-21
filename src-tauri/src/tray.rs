@@ -5,14 +5,18 @@
 //! `tauri-plugin-dialog`，没有直接调用任何平台原生 API——Dock 右键菜单这类纯
 //! macOS 概念暂时没有实现。
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{image::Image, AppHandle, Manager, Wry};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_autostart::ManagerExt as AutoStartManagerExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::AppState;
@@ -26,7 +30,7 @@ pub struct TrayHandles {
     pub restart_item: MenuItem<Wry>,
 }
 
-pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
+pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<TrayHandles> {
     let open_item = MenuItem::with_id(app, "open", "启动中…", false, None::<&str>)?;
     let copy_item = MenuItem::with_id(app, "copy", "复制访问链接", false, None::<&str>)?;
     let start_item = MenuItem::with_id(app, "start", "启动", true, None::<&str>)?;
@@ -35,6 +39,15 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     let config_item = MenuItem::with_id(app, "config", "编辑配置…", true, None::<&str>)?;
     let logs_item = MenuItem::with_id(app, "logs", "打开日志", true, None::<&str>)?;
     let dsh_home_item = MenuItem::with_id(app, "dsh-home", "打开 DSH 数据目录", true, None::<&str>)?;
+    let login_items_item = MenuItem::with_id(app, "login-items", "打开登录项设置", true, None::<&str>)?;
+    let launch_at_login_item = CheckMenuItem::with_id(
+        app,
+        "launch-at-login",
+        "登录时启动",
+        true,
+        launch_at_login_enabled,
+        None::<&str>,
+    )?;
     let about_item = MenuItem::with_id(app, "about", "关于 DSH Launcher", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -50,37 +63,53 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
             &config_item,
             &logs_item,
             &dsh_home_item,
+            &login_items_item,
+            &launch_at_login_item,
             &PredefinedMenuItem::separator(app)?,
             &about_item,
             &quit_item,
         ],
     )?;
 
+    // Swift 版的 macOS 应用菜单和 Edit 菜单。即使当前没有 WebView 窗口，
+    // Tauri 仍然可以把它们注册为 app-wide menu；后续增加窗口时也会自动继承。
+    let app_about_item = MenuItem::with_id(app, "app-about", "关于 DSH Launcher", true, None::<&str>)?;
+    let app_quit_item = MenuItem::with_id(app, "app-quit", "退出 DSH Launcher", true, None::<&str>)?;
+    let app_menu = Submenu::with_items(
+        app,
+        "DSH Launcher",
+        true,
+        &[
+            &app_about_item,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &app_quit_item,
+        ],
+    )?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "编辑",
+        true,
+        &[
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    app.set_menu(Menu::with_items(app, &[&app_menu, &edit_menu])?)?;
+
+    let launch_at_login_for_events = launch_at_login_item.clone();
     let mut builder = TrayIconBuilder::with_id("main")
         .icon(tray_icon())
         .menu(&menu)
         .tooltip("DSH Launcher")
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => {
-                let Some(state) = app.try_state::<AppState>() else {
-                    return;
-                };
-                let dsh_guard = state.dsh.lock().unwrap();
-                let Some(dsh) = dsh_guard.as_ref() else {
-                    return; // 还没就绪；正常情况下这时菜单项应该是禁用的
-                };
-                dsh.open_browser();
+        .on_menu_event(move |app, event| {
+            if event.id().as_ref() == "launch-at-login" {
+                toggle_launch_at_login(app, &launch_at_login_for_events);
+            } else {
+                handle_menu_event(app, event.id().as_ref());
             }
-            "copy" => with_dsh(app, |dsh| dsh.copy_access_link()),
-            "start" => with_dsh(app, |dsh| dsh.start()),
-            "stop" => with_dsh(app, |dsh| dsh.stop()),
-            "restart" => with_dsh(app, |dsh| dsh.restart()),
-            "config" => open_config(app),
-            "logs" => open_logs(app),
-            "dsh-home" => open_dsh_home(app),
-            "about" => show_about(app),
-            "quit" => confirm_quit(app),
-            _ => {}
         });
 
     // macOS 把不带颜色、只有 alpha 通道的「模板图」按亮暗菜单栏自动上色；
@@ -99,6 +128,32 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         stop_item,
         restart_item,
     })
+}
+
+pub fn handle_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "open" => {
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let dsh_guard = state.dsh.lock().unwrap();
+            let Some(dsh) = dsh_guard.as_ref() else {
+                return;
+            };
+            dsh.open_browser();
+        }
+        "copy" => with_dsh(app, |dsh| dsh.copy_access_link()),
+        "start" => with_dsh(app, |dsh| dsh.start()),
+        "stop" => with_dsh(app, |dsh| dsh.stop()),
+        "restart" => with_dsh(app, |dsh| dsh.restart()),
+        "config" => open_config(app),
+        "logs" => open_logs(app),
+        "dsh-home" => open_dsh_home(app),
+        "login-items" => open_login_items(app),
+        "about" | "app-about" => show_about(app),
+        "quit" | "app-quit" => confirm_quit(app),
+        _ => {}
+    }
 }
 
 fn with_dsh(app: &AppHandle, action: impl FnOnce(&crate::dsh::DshProcess)) {
@@ -126,14 +181,46 @@ fn open_config(app: &AppHandle) {
     }
 }
 
-fn open_logs(app: &AppHandle) {
+pub(crate) fn open_logs(app: &AppHandle) {
     let home = app
         .path()
         .home_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let path = crate::config::AppPaths::new(home).logs;
-    if let Err(error) = app.opener().open_path(path.display().to_string(), None::<&str>) {
+    let files = [path.join("launcher.log"), path.join("dsh.log")];
+    let existing = files.iter().filter(|file| file.exists()).collect::<Vec<_>>();
+    let result = if existing.is_empty() {
+        app.opener().open_path(path.display().to_string(), None::<&str>)
+    } else {
+        app.opener().reveal_items_in_dir(existing)
+    };
+    if let Err(error) = result {
         eprintln!("打开日志目录失败：{error}");
+    }
+}
+
+fn open_login_items(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let target = "x-apple.systempreferences:com.apple.LoginItems-Settings";
+    #[cfg(windows)]
+    let target = "ms-settings:startupapps";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let target = {
+        let home = app
+            .path()
+            .home_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let path = home.join(".config/autostart");
+        if let Err(error) = std::fs::create_dir_all(&path) {
+            eprintln!("创建自启动目录失败：{error}");
+        }
+        return app
+            .opener()
+            .open_path(path.display().to_string(), None::<&str>)
+            .unwrap_or_else(|error| eprintln!("打开自启动目录失败：{error}"));
+    };
+    if let Err(error) = app.opener().open_url(target, None::<&str>) {
+        eprintln!("打开登录项设置失败：{error}");
     }
 }
 
@@ -154,13 +241,57 @@ fn open_dsh_home(app: &AppHandle) {
     }
 }
 
-fn show_about(app: &AppHandle) {
-    let details = format!(
-        "Version: {}\nGitHub: Drswith/dsh-launcher\nDSH: external command (PATH/config.json)\nOS: {} {}",
-        env!("CARGO_PKG_VERSION"),
+pub(crate) fn show_about(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let details = about_details(&app);
+        let dialog_app = app.clone();
+        let _ = app.run_on_main_thread(move || show_about_dialog(&dialog_app, details));
+    });
+}
+
+fn about_details(app: &AppHandle) -> String {
+    let home = app
+        .path()
+        .home_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let paths = crate::config::AppPaths::new(home.clone());
+    let config = crate::config::ShellConfig::load(&paths.config).unwrap_or_default();
+    let environment = config.environment(&home);
+    let node_program = config
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.node.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("node");
+    let dsh_version =
+        command_version("dsh", &["--version"], &environment).unwrap_or_else(|| "未找到 dsh 命令".to_owned());
+    let node_version = command_version(node_program, &["--version"], &environment)
+        .unwrap_or_else(|| "未找到 node 命令".to_owned());
+    let pnpm_version = command_version("pnpm", &["--version"], &environment)
+        .unwrap_or_else(|| "未找到 pnpm 命令".to_owned());
+    let commit = env!("DSH_LAUNCHER_GIT_COMMIT");
+    let build_date = if env!("DSH_LAUNCHER_BUILD_DATE").is_empty() {
+        "未知"
+    } else {
+        env!("DSH_LAUNCHER_BUILD_DATE")
+    };
+    format!(
+        "Version: {} (build {})\nGitHub: {}\nCommit: {}\nBuilt: {}\nDSH: {}\nNode.js: {}\npnpm: {}\nOS: {} {}",
+        env!("DSH_LAUNCHER_VERSION_LABEL"),
+        env!("DSH_LAUNCHER_BUILD_NUMBER"),
+        env!("DSH_LAUNCHER_REPO_URL"),
+        commit,
+        build_date,
+        dsh_version,
+        node_version,
+        pnpm_version,
         std::env::consts::OS,
         std::env::consts::ARCH
-    );
+    )
+}
+
+fn show_about_dialog(app: &AppHandle, details: String) {
     let copy_text = details.clone();
     app.dialog()
         .message(details)
@@ -175,6 +306,71 @@ fn show_about(app: &AppHandle) {
                 std::thread::spawn(move || copy_text_to_clipboard(&copy_text));
             }
         });
+}
+
+fn command_version(program: &str, args: &[&str], environment: &BTreeMap<String, String>) -> Option<String> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env_clear()
+        .envs(environment)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    for bytes in [&output.stdout, &output.stderr] {
+        if let Some(value) = String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+        {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn toggle_launch_at_login(app: &AppHandle, item: &CheckMenuItem<Wry>) {
+    let current = app.autolaunch().is_enabled().unwrap_or(false);
+    let result = if current {
+        app.autolaunch().disable()
+    } else {
+        app.autolaunch().enable()
+    };
+    match result {
+        Ok(()) => {
+            let enabled = !current;
+            let _ = item.set_checked(enabled);
+            if let Some(state) = app.try_state::<AppState>() {
+                state.preferences.set("launchAtLogin", enabled);
+                let _ = state.preferences.save();
+            }
+        }
+        Err(error) => {
+            let _ = item.set_checked(current);
+            app.dialog()
+                .message(format!("无法更新登录启动设置：{error}"))
+                .title("登录时启动")
+                .kind(MessageDialogKind::Error)
+                .show(|_| {});
+        }
+    }
 }
 
 pub(crate) fn copy_text_to_clipboard(text: &str) {
@@ -222,6 +418,15 @@ fn confirm_quit(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    let should_confirm = state
+        .preferences
+        .get("confirmQuit")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    if !should_confirm {
+        app.exit(0);
+        return;
+    }
     if state
         .quit_dialog_open
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -235,16 +440,33 @@ fn confirm_quit(app: &AppHandle) {
         .message("dsh 服务也会一起停止。")
         .title("退出 DSH Launcher？")
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
             "退出".to_string(),
+            "退出且不再询问".to_string(),
             "取消".to_string(),
         ))
-        .show(move |confirmed| {
+        .show_with_result(move |result| {
             if let Some(state) = app.try_state::<AppState>() {
                 state.quit_dialog_open.store(false, Ordering::SeqCst);
             }
-            if confirmed {
-                app.exit(0);
+            match result {
+                MessageDialogResult::Yes => app.exit(0),
+                MessageDialogResult::No => {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.preferences.set("confirmQuit", false);
+                        let _ = state.preferences.save();
+                    }
+                    app.exit(0);
+                }
+                MessageDialogResult::Custom(value) if value == "退出" => app.exit(0),
+                MessageDialogResult::Custom(value) if value == "退出且不再询问" => {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.preferences.set("confirmQuit", false);
+                        let _ = state.preferences.save();
+                    }
+                    app.exit(0);
+                }
+                _ => {}
             }
         });
 }
