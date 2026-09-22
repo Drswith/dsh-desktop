@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "预留给以后加窗口用；托盘菜单和打开浏览器都是纯 Rust 调用，不走这层权限。",
-  "windows": [],
-  "permissions": ["core:default", "notification:default"]
+  "description": "本地启动窗口仅可监听状态；文件、浏览器、重试均由受限的 Rust 动作代理。",
+  "windows": ["startup"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

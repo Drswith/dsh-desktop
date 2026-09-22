@@ -28,7 +28,7 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 # 退出确认弹窗。
 tauri-plugin-dialog = "2"
-# 反馈慢启动和 dsh 就绪；错误仍使用 dialog，避免同一事件重复提示。
+# 启动窗口转入后台后的阶段/就绪通知兜底；可见窗口不重复刷通知。
 tauri-plugin-notification = "2"
 # 登录启动和轻量用户偏好。
 tauri-plugin-autostart = "2.0.1"

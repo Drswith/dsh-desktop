@@ -431,7 +431,8 @@ fn data_root(home: &Path) -> PathBuf {
         }
     }
 
-    let name = if cfg!(debug_assertions) {
+    // release 优化的测试包也必须保持隔离，不能只以 debug_assertions 判断身份。
+    let name = if cfg!(debug_assertions) || cfg!(dsh_launcher_test_build) {
         DEVELOPMENT_DATA_DIR_NAME
     } else {
         PRODUCTION_DATA_DIR_NAME
@@ -681,9 +682,9 @@ mod tests {
     }
 
     #[test]
-    fn uses_development_data_directory_for_debug_builds() {
+    fn uses_development_data_directory_for_debug_or_test_builds() {
         let paths = AppPaths::new(PathBuf::from("/tmp/dsh-launcher-home"));
-        let expected = if cfg!(debug_assertions) {
+        let expected = if cfg!(debug_assertions) || cfg!(dsh_launcher_test_build) {
             "/tmp/dsh-launcher-home/.dsh-launcher-dev"
         } else {
             "/tmp/dsh-launcher-home/.dsh-launcher"

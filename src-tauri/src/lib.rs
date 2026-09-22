@@ -12,6 +12,7 @@ mod dsh;
 mod logging;
 mod process_tree;
 mod ready_line;
+mod startup;
 mod tray;
 
 #[cfg(target_os = "macos")]
@@ -33,7 +34,9 @@ const PORT_ATTEMPTS: u16 = 20;
 /// 挂在 Tauri 状态里的唯一一份共享数据。
 pub struct AppState {
     /// dsh Web Profile 子进程（如果启动成功的话）。
-    dsh: Mutex<Option<dsh::DshProcess>>,
+    dsh: Mutex<Option<Arc<dsh::DshProcess>>>,
+    /// 手动操作串行执行；退出清理不能等待这个可能正在更新菜单的锁。
+    dsh_actions: Mutex<()>,
     /// Swift `NSUserDefaults` 的最小替代：保存退出确认和登录启动偏好。
     preferences: Arc<Store<Wry>>,
     /// 退出确认框是不是已经弹出来了——连点几下托盘「退出」不该堆出好几个框。
@@ -43,14 +46,26 @@ pub struct AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            startup::startup_snapshot,
+            startup::startup_action,
+            startup::startup_resize
+        ])
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // Windows/Linux 的第二份进程会把 URL 放进 argv；macOS 则由 deep-link
             // 插件转成 Opened 事件。这里再手动遍历一次，兼容插件版本/平台差异。
+            let mut deep_link = false;
             for argument in args {
                 if let Ok(url) = Url::parse(&argument) {
-                    handle_deep_link(app, &url);
+                    if url.scheme() == deep_link_scheme() {
+                        deep_link = true;
+                        handle_deep_link(app, &url);
+                    }
                 }
+            }
+            if !deep_link {
+                startup::show(app);
             }
         }))
         .plugin(tauri_plugin_opener::init())
@@ -70,6 +85,7 @@ pub fn run() {
             let home_dir = app.path().home_dir().unwrap_or_else(|_| PathBuf::from("."));
             let paths = config::AppPaths::new(home_dir.clone());
             let logs = logging::LogFiles::new(&paths.logs);
+            startup::install(app.handle(), logs.launcher.clone());
             let preferences = app.store(paths.preferences.clone())?;
             let launch_at_login_enabled = app.autolaunch().is_enabled().unwrap_or_else(|error| {
                 logs.launcher
@@ -125,7 +141,8 @@ pub fn run() {
                 record_path,
             });
             app.manage(AppState {
-                dsh: Mutex::new(Some(dsh_process)),
+                dsh: Mutex::new(Some(Arc::new(dsh_process))),
+                dsh_actions: Mutex::new(()),
                 preferences,
                 quit_dialog_open: AtomicBool::new(false),
             });
@@ -157,6 +174,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Tauri 应用初始化失败")
         .run(|app_handle, event| {
+            // 关闭最后一个进度窗口只是转入托盘；显式退出仍走原有清理流程。
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event {
+                api.prevent_exit();
+            }
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = &event {
+                startup::show(app_handle);
+            }
             // 退出前尽力把 dsh 子进程停掉，不然它会变成孤儿进程继续占着端口。
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
@@ -204,8 +229,16 @@ fn is_stable_install_location() -> bool {
     })
 }
 
+fn deep_link_scheme() -> &'static str {
+    if cfg!(dsh_launcher_test_build) {
+        "dsh-launcher-test"
+    } else {
+        "dsh-launcher"
+    }
+}
+
 fn handle_deep_link(app: &AppHandle, url: &Url) {
-    if url.scheme() != "dsh-launcher" {
+    if url.scheme() != deep_link_scheme() {
         return;
     }
     let action = url
@@ -218,16 +251,9 @@ fn handle_deep_link(app: &AppHandle, url: &Url) {
         tray::open_logs(app);
         return;
     }
-    let Some(state) = app.try_state::<AppState>() else {
-        return;
-    };
-    let guard = state.dsh.lock().unwrap();
-    let Some(dsh) = guard.as_ref() else { return };
     match action.as_str() {
-        "open" | "" => dsh.open_browser(),
-        "start" => dsh.start(),
-        "stop" => dsh.stop(),
-        "restart" => dsh.restart(),
+        "open" | "" => tray::handle_menu_event(app, "open"),
+        "start" | "stop" | "restart" => tray::handle_menu_event(app, &action),
         _ => {}
     }
 }

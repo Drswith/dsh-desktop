@@ -58,6 +58,7 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
     )?;
     let open_item = MenuItem::with_id(app, "open", "启动中…", false, None::<&str>)?;
     let copy_item = MenuItem::with_id(app, "copy", "复制访问链接", false, None::<&str>)?;
+    let progress_item = MenuItem::with_id(app, "progress", "查看启动进度…", true, None::<&str>)?;
     let start_item = MenuItem::with_id(app, "start", "启动", true, None::<&str>)?;
     let stop_item = MenuItem::with_id(app, "stop", "停止", true, None::<&str>)?;
     let restart_item = MenuItem::with_id(app, "restart", "重启", true, None::<&str>)?;
@@ -91,6 +92,7 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
             &PredefinedMenuItem::separator(app)?,
             &open_item,
             &copy_item,
+            &progress_item,
             &PredefinedMenuItem::separator(app)?,
             &start_item,
             &stop_item,
@@ -180,17 +182,9 @@ pub fn build(app: &AppHandle, launch_at_login_enabled: bool) -> tauri::Result<Tr
 
 pub fn handle_menu_event(app: &AppHandle, id: &str) {
     match id {
-        "open" => {
-            let Some(state) = app.try_state::<AppState>() else {
-                return;
-            };
-            let dsh_guard = state.dsh.lock().unwrap();
-            let Some(dsh) = dsh_guard.as_ref() else {
-                return;
-            };
-            dsh.open_browser();
-        }
+        "open" => with_dsh(app, |dsh| dsh.open_browser()),
         "copy" => with_dsh(app, |dsh| dsh.copy_access_link()),
+        "progress" => crate::startup::show(app),
         "start" => with_dsh(app, |dsh| dsh.start()),
         "stop" => with_dsh(app, |dsh| dsh.stop()),
         "restart" => with_dsh(app, |dsh| dsh.restart()),
@@ -204,14 +198,19 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-fn with_dsh(app: &AppHandle, action: impl FnOnce(&crate::dsh::DshProcess)) {
-    let Some(state) = app.try_state::<AppState>() else {
-        return;
-    };
-    let guard = state.dsh.lock().unwrap();
-    if let Some(dsh) = guard.as_ref() {
-        action(dsh);
-    }
+fn with_dsh(app: &AppHandle, action: impl FnOnce(&crate::dsh::DshProcess) + Send + 'static) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let _action = state.dsh_actions.lock().unwrap();
+        // 只在取句柄时持有 AppState 锁，不能持锁等待 Tauri 主线程的菜单操作。
+        let process = state.dsh.lock().unwrap().clone();
+        if let Some(dsh) = process {
+            action(&dsh);
+        }
+    });
 }
 
 fn open_config(app: &AppHandle) {
@@ -219,6 +218,10 @@ fn open_config(app: &AppHandle) {
 }
 
 pub(crate) fn show_startup_error(app: &AppHandle, error: &str) {
+    crate::startup::update(app, crate::startup::Phase::Failed, error);
+    if crate::startup::is_visible(app) {
+        return;
+    }
     let missing_runner = error.contains("No such file") || error.contains("找不到");
     let message = if missing_runner {
         "找不到外部 Runner 命令。\n\n本项目默认通过 pnpm dlx 启动固定版本的 @deepseek-ai/dsh，不要求全局安装 dsh。请确认 Node.js 和 pnpm 已安装，并且 pnpm 在登录 shell 的 PATH 中；也可以在 ~/.dsh-launcher/config.json 的 runner.command 中填写 pnpm 的绝对路径。\n\n启动器不会安装或升级 runtime。"

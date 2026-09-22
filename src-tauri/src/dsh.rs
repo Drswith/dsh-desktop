@@ -25,6 +25,7 @@ use crate::config::ShellConfig;
 use crate::logging::{LogFile, LogFiles};
 use crate::process_tree::ManagedChild;
 use crate::ready_line;
+use crate::startup::{self, Phase};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 const STARTUP_NOTIFY_AFTER: Duration = Duration::from_secs(5);
@@ -82,6 +83,10 @@ struct LaunchSpec {
     startup_notification_requested: Arc<AtomicBool>,
     /// 当前启动会话是否仍在等待 DSH 就绪，用于发送慢启动提醒。
     startup_notification_active: Arc<AtomicBool>,
+    /// 所有 dsh 子进程生命周期变更统一先拿此锁，再拿 `child` 锁。
+    /// 锁内只做进程/记录状态操作，不调用 Tauri 主线程接口。
+    lifecycle: Arc<Mutex<()>>,
+    generation: Arc<AtomicU64>,
 }
 
 pub struct DshProcess {
@@ -104,6 +109,8 @@ impl DshProcess {
         let preflight_generation = Arc::new(AtomicU64::new(0));
         let startup_notification_requested = Arc::new(AtomicBool::new(true));
         let startup_notification_active = Arc::new(AtomicBool::new(true));
+        let lifecycle = Arc::new(Mutex::new(()));
+        let generation = Arc::new(AtomicU64::new(0));
         let spec = Arc::new(LaunchSpec {
             preferred_port: options.preferred_port,
             port_attempts: options.port_attempts,
@@ -125,11 +132,10 @@ impl DshProcess {
             preflight_generation,
             startup_notification_requested,
             startup_notification_active,
+            lifecycle,
+            generation,
         });
-        crate::tray::notify(&spec.app, "DSH Launcher", "正在初始化 DSH…");
-        if let Some(path) = &spec.record_path {
-            kill_stale_orphan(path);
-        }
+        notify_startup(&spec.app, "DSH Launcher", "正在初始化 DSH…");
 
         let child = Arc::new(Mutex::new(None));
         let ready_url = Arc::new(Mutex::new(None));
@@ -137,20 +143,11 @@ impl DshProcess {
         let manual_start = Arc::new(AtomicBool::new(false));
         let manual_restart = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let generation = Arc::new(AtomicU64::new(0));
         let browser_gate = Arc::new(Mutex::new(
             Instant::now()
                 .checked_sub(Duration::from_secs(3))
                 .unwrap_or_else(Instant::now),
         ));
-
-        if spec.config.lock().unwrap().needs_build_preflight() {
-            set_menu(&spec.open_item, "检查构建许可…", false);
-            set_status(&spec.status_item, "状态：检查构建许可…");
-            set_controls(&spec, false, true, true);
-        } else if let Err(error) = spawn_child(&spec, &child, &ready_url, &generation, &browser_gate) {
-            handle_spawn_error(&spec, &error);
-        }
 
         let worker_spec = Arc::clone(&spec);
         let worker_child = Arc::clone(&child);
@@ -159,11 +156,36 @@ impl DshProcess {
         let worker_manual_start = Arc::clone(&manual_start);
         let worker_manual_restart = Arc::clone(&manual_restart);
         let worker_shutdown = Arc::clone(&shutdown);
-        let worker_generation = Arc::clone(&generation);
+        let worker_generation = Arc::clone(&worker_spec.generation);
         let worker_gate = Arc::clone(&browser_gate);
         thread::Builder::new()
             .name("dsh-watchdog".to_owned())
             .spawn(move || {
+                // setup 只装配状态，不等待孤儿清理/登录 shell/Runner；让 Webview
+                // 和主事件循环尽早开始绘制。所有初次启动工作都留在监督线程里。
+                if let Some(path) = &worker_spec.record_path {
+                    kill_stale_orphan(path);
+                }
+                if worker_shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                if !worker_spec.config.lock().unwrap().needs_build_preflight()
+                    && worker_desired.load(Ordering::SeqCst)
+                {
+                    if let Err(error) = spawn_child(
+                        &worker_spec,
+                        &worker_child,
+                        &worker_ready,
+                        &worker_generation,
+                        &worker_gate,
+                        &worker_desired,
+                    ) {
+                        if error.kind() != std::io::ErrorKind::Interrupted {
+                            worker_desired.store(false, Ordering::SeqCst);
+                            handle_spawn_error(&worker_spec, &error);
+                        }
+                    }
+                }
                 supervise(
                     worker_spec,
                     worker_child,
@@ -199,7 +221,11 @@ impl DshProcess {
     }
 
     pub fn start(&self) {
-        self.desired_running.store(true, Ordering::SeqCst);
+        if self.desired_running.swap(true, Ordering::SeqCst) {
+            // 已在启动/运行时的重复深链接只展示现有状态，不制造永远不就绪的新会话。
+            startup::show(&self.spec.app);
+            return;
+        }
         self.manual_start.store(true, Ordering::SeqCst);
         begin_startup_notifications(&self.spec);
         set_controls(&self.spec, false, true, true);
@@ -208,10 +234,16 @@ impl DshProcess {
 
     pub fn stop(&self) {
         self.desired_running.store(false, Ordering::SeqCst);
+        startup::update(
+            &self.spec.app,
+            Phase::Stopped,
+            "服务已停止。可以重试，或关闭窗口保留托盘。",
+        );
         self.manual_start.store(false, Ordering::SeqCst);
         self.manual_restart.store(false, Ordering::SeqCst);
         cancel_startup_notifications(&self.spec);
         cancel_preflight(&self.spec);
+        invalidate_generation(&self.spec.generation);
         terminate_current(&self.child, &self.spec);
         clear_ready(&self.ready_url, &self.spec.open_item, &self.spec.copy_item);
         set_status(&self.spec.status_item, "状态：已停止");
@@ -236,11 +268,12 @@ impl DshProcess {
         self.manual_restart.store(true, Ordering::SeqCst);
         self.manual_start.store(true, Ordering::SeqCst);
         begin_startup_notifications(&self.spec);
-        set_controls(&self.spec, false, true, true);
         cancel_preflight(&self.spec);
+        invalidate_generation(&self.spec.generation);
         terminate_current(&self.child, &self.spec);
         clear_ready(&self.ready_url, &self.spec.open_item, &self.spec.copy_item);
         set_status(&self.spec.status_item, "状态：重启中…");
+        set_controls(&self.spec, false, true, true);
         remove_record(&self.spec.record_path);
         self.spec
             .logs
@@ -262,6 +295,7 @@ impl DshProcess {
         self.desired_running.store(false, Ordering::SeqCst);
         cancel_startup_notifications(&self.spec);
         cancel_preflight(&self.spec);
+        invalidate_generation(&self.spec.generation);
         terminate_current(&self.child, &self.spec);
         remove_record(&self.spec.record_path);
     }
@@ -285,7 +319,7 @@ fn supervise(
     generation: Arc<AtomicU64>,
     browser_gate: Arc<Mutex<Instant>>,
 ) {
-    let mut next_spawn = Instant::now() + Duration::from_secs(1);
+    let mut next_spawn = Instant::now();
     let mut started_at = Instant::now();
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
     let mut health_failures = 0;
@@ -310,6 +344,7 @@ fn supervise(
         }
 
         let exited = {
+            let _lifecycle = spec.lifecycle.lock().unwrap();
             let mut guard = child.lock().unwrap();
             match guard.as_mut() {
                 Some(current) => match current.try_wait() {
@@ -326,6 +361,7 @@ fn supervise(
         };
 
         if let Some(reason) = exited {
+            invalidate_generation(&generation);
             terminate_current(&child, &spec);
             clear_ready(&ready_url, &spec.open_item, &spec.copy_item);
             remove_record(&spec.record_path);
@@ -341,7 +377,7 @@ fn supervise(
             continue;
         }
 
-        if child.lock().unwrap().is_none() {
+        if child_is_absent(&spec, &child) {
             if spec.preflight_active.load(Ordering::SeqCst) {
                 continue;
             }
@@ -352,7 +388,14 @@ fn supervise(
                 start_preflight(Arc::clone(&spec), Arc::clone(&desired_running));
                 continue;
             }
-            match spawn_child(&spec, &child, &ready_url, &generation, &browser_gate) {
+            match spawn_child(
+                &spec,
+                &child,
+                &ready_url,
+                &generation,
+                &browser_gate,
+                &desired_running,
+            ) {
                 Ok((now, _announced)) => {
                     started_at = now;
                     next_health = now + HEALTH_INTERVAL;
@@ -360,6 +403,9 @@ fn supervise(
                     startup_notification_sent = false;
                 }
                 Err(error) => {
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
                     schedule_failure(
                         &spec,
                         &desired_running,
@@ -379,7 +425,7 @@ fn supervise(
                 && !startup_notification_sent
                 && started_at.elapsed() >= STARTUP_NOTIFY_AFTER
             {
-                crate::tray::notify(
+                notify_startup(
                     &spec.app,
                     "DSH Launcher",
                     "DSH 仍在启动，完成后会自动打开浏览器。",
@@ -390,6 +436,7 @@ fn supervise(
                 spec.logs
                     .launcher
                     .log("watchdog", "startup timeout; restarting dsh");
+                invalidate_generation(&generation);
                 terminate_current(&child, &spec);
                 clear_ready(&ready_url, &spec.open_item, &spec.copy_item);
                 remove_record(&spec.record_path);
@@ -422,6 +469,7 @@ fn supervise(
                     &format!("health check failed ({health_failures}/{MAX_HEALTH_FAILURES})"),
                 );
                 if health_failures >= MAX_HEALTH_FAILURES {
+                    invalidate_generation(&generation);
                     terminate_current(&child, &spec);
                     clear_ready(&ready_url, &spec.open_item, &spec.copy_item);
                     remove_record(&spec.record_path);
@@ -456,6 +504,7 @@ fn schedule_failure(
         set_menu(&spec.open_item, "已停止", false);
         set_status(&spec.status_item, "状态：已停止");
         set_controls(spec, true, false, false);
+        startup::update(&spec.app, Phase::Stopped, "服务已停止。");
         return;
     }
     if manual_restart.swap(false, Ordering::SeqCst) {
@@ -488,6 +537,11 @@ fn schedule_failure(
         set_status(&spec.status_item, &status);
         set_controls(spec, true, false, false);
         spec.logs.launcher.log("watchdog", "crash circuit breaker opened");
+        startup::update(
+            &spec.app,
+            Phase::Failed,
+            &format!("多次启动失败，已暂停自动重试。{reason}"),
+        );
         return;
     }
 
@@ -501,6 +555,11 @@ fn schedule_failure(
     spec.logs
         .launcher
         .log("watchdog", &format!("retry scheduled in {}s", delay.as_secs()));
+    startup::update(
+        &spec.app,
+        Phase::Retrying,
+        &format!("{reason}；将在 {} 秒后自动重试。", delay.as_secs()),
+    );
 }
 
 fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
@@ -508,8 +567,13 @@ fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
         return;
     }
     let preflight_generation = spec.preflight_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    startup::update(
+        &spec.app,
+        Phase::Checking,
+        "正在检查依赖构建许可，首次运行可能需要下载依赖。",
+    );
     if spec.startup_notification_active.load(Ordering::SeqCst) {
-        crate::tray::notify(&spec.app, "DSH Launcher", "正在检查构建许可…");
+        notify_startup(&spec.app, "DSH Launcher", "正在检查构建许可…");
     }
     set_menu(&spec.open_item, "检查构建许可…", false);
     set_status(&spec.status_item, "状态：检查构建许可…");
@@ -540,6 +604,11 @@ fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
                 let dialog_spec = Arc::clone(&worker_spec);
                 let dialog_desired = Arc::clone(&desired_running);
                 let approved_dependencies = dependencies.clone();
+                startup::update(
+                    &worker_spec.app,
+                    Phase::Approval,
+                    "等待你在系统对话框中确认构建许可；未确认前不会执行这些构建脚本。",
+                );
                 crate::tray::confirm_build_permissions(
                     &worker_spec.app,
                     &package,
@@ -566,6 +635,11 @@ fn start_preflight(spec: Arc<LaunchSpec>, desired_running: Arc<AtomicBool>) {
                             set_menu(&dialog_spec.open_item, "等待许可", false);
                             set_status(&dialog_spec.status_item, "状态：等待构建许可");
                             set_controls(&dialog_spec, true, false, false);
+                            startup::update(
+                                &dialog_spec.app,
+                                Phase::Stopped,
+                                "未授予构建许可，启动已暂停。点击重试可重新检查。",
+                            );
                             dialog_spec
                                 .logs
                                 .launcher
@@ -616,6 +690,7 @@ fn approve_preflight(
         set_menu(&spec.open_item, "启动失败", false);
         set_status(&spec.status_item, "状态：启动失败 · 无法保存构建许可");
         set_controls(spec, true, false, false);
+        startup::update(&spec.app, Phase::Failed, &format!("无法保存构建许可：{error}"));
         crate::tray::show_config_error(&spec.app, &spec.config_path, &error);
         return;
     }
@@ -766,9 +841,16 @@ fn cancel_preflight(spec: &Arc<LaunchSpec>) {
 }
 
 fn begin_startup_notifications(spec: &LaunchSpec) {
+    startup::begin(&spec.app);
     spec.startup_notification_requested.store(true, Ordering::SeqCst);
     spec.startup_notification_active.store(true, Ordering::SeqCst);
-    crate::tray::notify(&spec.app, "DSH Launcher", "正在初始化 DSH…");
+    // 新窗口正在主线程排队创建，不额外发同一阶段通知。
+}
+
+fn notify_startup(app: &AppHandle, title: &str, detail: &str) {
+    if !startup::is_visible(app) {
+        crate::tray::notify(app, title, detail);
+    }
 }
 
 fn cancel_startup_notifications(spec: &LaunchSpec) {
@@ -787,7 +869,10 @@ fn spawn_child(
     ready_url: &Arc<Mutex<Option<Url>>>,
     generation: &Arc<AtomicU64>,
     browser_gate: &Arc<Mutex<Instant>>,
+    desired_running: &AtomicBool,
 ) -> std::io::Result<(Instant, bool)> {
+    let spawn_epoch = generation.load(Ordering::SeqCst);
+    let startup_attempt = startup::attempt(&spec.app);
     let config = spec.config.lock().unwrap().clone();
     let preferred_port = config.port.unwrap_or(spec.preferred_port);
     let port = match first_available_port(preferred_port, spec.port_attempts) {
@@ -820,30 +905,73 @@ fn spawn_child(
             config.profile()
         ),
     );
-    let mut process = ManagedChild::spawn(&mut command)?;
-    let announce_startup = spec.startup_notification_requested.swap(false, Ordering::SeqCst);
-    if announce_startup {
-        crate::tray::notify(&spec.app, "DSH Launcher", "正在启动 DSH…");
+    if !startup::publish(
+        &spec.app,
+        startup_attempt,
+        Phase::Starting,
+        "正在启动本地服务，首次运行可能需要下载依赖。",
+    ) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "启动会话已结束",
+        ));
     }
-    if let Some(path) = &spec.record_path {
-        write_record(
-            path,
-            process.id(),
-            port,
-            process.process_group_id(),
-            process_start_time(process.id()),
-        );
+    let (stdout, stderr, this_generation, child_id, announce_startup) = {
+        // stop/restart 与这里严格使用同一顺序：lifecycle -> child。
+        // desired_running 的二次检查覆盖 spawn 后、登记前的停止时序。
+        let _lifecycle = spec.lifecycle.lock().unwrap();
+        if !desired_running.load(Ordering::SeqCst) || !watcher_generation_is_current(generation, spawn_epoch)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "启动会话已结束",
+            ));
+        }
+        let mut process = ManagedChild::spawn(&mut command)?;
+        if !desired_running.load(Ordering::SeqCst) || !watcher_generation_is_current(generation, spawn_epoch)
+        {
+            process.terminate();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "启动会话已结束",
+            ));
+        }
+        let announce_startup = spec.startup_notification_requested.swap(false, Ordering::SeqCst);
+        if let Some(path) = &spec.record_path {
+            write_record(
+                path,
+                process.id(),
+                port,
+                process.process_group_id(),
+                process_start_time(process.id()),
+            );
+        }
+        let stdout = process.take_stdout().expect("stdout 已经设成 piped");
+        let stderr = process.take_stderr().expect("stderr 已经设成 piped");
+        let this_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let child_id = process.id();
+        register_child_locked(child_cell, desired_running, generation, this_generation, process).map_err(
+            |mut process| {
+                process.terminate();
+                std::io::Error::new(std::io::ErrorKind::Interrupted, "启动会话已结束")
+            },
+        )?;
+        *ready_url.lock().unwrap() = None;
+        (stdout, stderr, this_generation, child_id, announce_startup)
+    };
+
+    if announce_startup && desired_running.load(Ordering::SeqCst) {
+        notify_startup(&spec.app, "DSH Launcher", "正在启动 DSH…");
     }
-    let stdout = process.take_stdout().expect("stdout 已经设成 piped");
-    let stderr = process.take_stderr().expect("stderr 已经设成 piped");
-    let this_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
-    *ready_url.lock().unwrap() = None;
-    set_menu(&spec.open_item, "启动中…", false);
-    set_status(&spec.status_item, "状态：启动中…");
-    set_controls(spec, false, true, true);
-    *child_cell.lock().unwrap() = Some(process);
+    if desired_running.load(Ordering::SeqCst) {
+        set_menu(&spec.open_item, "启动中…", false);
+        set_status(&spec.status_item, "状态：启动中…");
+        set_controls(spec, false, true, true);
+    }
 
     let watcher_url = Arc::clone(ready_url);
+    let watcher_child = Arc::clone(child_cell);
+    let watcher_lifecycle = Arc::clone(&spec.lifecycle);
     let watcher_generation = Arc::clone(generation);
     let watcher_gate = Arc::clone(browser_gate);
     let watcher_app = spec.app.clone();
@@ -859,18 +987,58 @@ fn spawn_child(
         let mut ready = false;
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             watcher_log.log("stdout", &line);
-            if ready || watcher_generation.load(Ordering::SeqCst) != this_generation {
+            if ready || !watcher_generation_is_current(&watcher_generation, this_generation) {
                 continue;
             }
             if let Some(url) = ready_line::authenticated_url(&line) {
-                *watcher_url.lock().unwrap() = Some(url.clone());
+                if !commit_ready_url(
+                    &watcher_lifecycle,
+                    &watcher_child,
+                    &watcher_url,
+                    &watcher_generation,
+                    this_generation,
+                    child_id,
+                    url.clone(),
+                ) {
+                    continue;
+                }
+                let ready_detail = format!(
+                    "本地服务已就绪，端口 {}。此窗口即将关闭，服务继续在托盘运行。",
+                    url.port().unwrap_or(port)
+                );
+                if !startup::publish_if(&watcher_app, startup_attempt, Phase::Ready, &ready_detail, || {
+                    watcher_generation_is_current(&watcher_generation, this_generation)
+                }) {
+                    clear_ready_if_current(
+                        &watcher_lifecycle,
+                        &watcher_child,
+                        &watcher_url,
+                        &watcher_generation,
+                        this_generation,
+                        child_id,
+                    );
+                    continue;
+                }
+                if !watcher_generation_is_current(&watcher_generation, this_generation) {
+                    clear_ready_if_current(
+                        &watcher_lifecycle,
+                        &watcher_child,
+                        &watcher_url,
+                        &watcher_generation,
+                        this_generation,
+                        child_id,
+                    );
+                    continue;
+                }
                 let _ = watcher_item.set_text("打开 DSH");
                 let _ = watcher_item.set_enabled(true);
                 let _ = watcher_copy.set_enabled(true);
                 let _ =
                     watcher_status.set_text(format!("状态：运行中 · 端口 {}", url.port().unwrap_or(port)));
-                if watcher_announce_ready {
-                    crate::tray::notify(
+                if watcher_announce_ready
+                    && watcher_generation_is_current(&watcher_generation, this_generation)
+                {
+                    notify_startup(
                         &watcher_app,
                         "DSH 已就绪",
                         &format!("本地服务已启动，端口 {}。", url.port().unwrap_or(port)),
@@ -881,7 +1049,7 @@ fn spawn_child(
                     "launcher",
                     &format!("dsh ready port={}", url.port().unwrap_or(port)),
                 );
-                if auto_open {
+                if auto_open && watcher_generation_is_current(&watcher_generation, this_generation) {
                     open_browser_url(&watcher_app, &url, &watcher_gate, &launcher_log);
                 }
                 ready = true;
@@ -900,9 +1068,89 @@ fn spawn_child(
 }
 
 fn terminate_current(child: &Arc<Mutex<Option<ManagedChild>>>, spec: &LaunchSpec) {
+    // 与 spawn_child 相同：先生命周期锁，再 child 锁；锁内不触碰主线程。
+    let _lifecycle = spec.lifecycle.lock().unwrap();
+    // 调用方通常已在进入这里前失效一次；锁内再失效，覆盖 spawn 正在等待
+    // 生命周期锁时的 restart/stop 交错，避免它登记一个已失效的进程。
+    invalidate_generation(&spec.generation);
     if let Some(mut current) = child.lock().unwrap().take() {
         spec.logs.launcher.log("launcher", "stopping dsh process group");
         current.terminate();
+    }
+}
+
+fn child_is_absent(spec: &LaunchSpec, child: &Arc<Mutex<Option<ManagedChild>>>) -> bool {
+    let _lifecycle = spec.lifecycle.lock().unwrap();
+    child.lock().unwrap().is_none()
+}
+
+fn register_child_locked<T>(
+    child_cell: &Mutex<Option<T>>,
+    desired_running: &AtomicBool,
+    generation: &AtomicU64,
+    expected_generation: u64,
+    child: T,
+) -> Result<(), T> {
+    // 调用方必须已经持有 lifecycle；这里才取得 child 锁。
+    if !desired_running.load(Ordering::SeqCst)
+        || !watcher_generation_is_current(generation, expected_generation)
+    {
+        return Err(child);
+    }
+    *child_cell.lock().unwrap() = Some(child);
+    Ok(())
+}
+
+fn invalidate_generation(generation: &AtomicU64) {
+    generation.fetch_add(1, Ordering::SeqCst);
+}
+
+fn watcher_generation_is_current(generation: &AtomicU64, expected: u64) -> bool {
+    generation.load(Ordering::SeqCst) == expected
+}
+
+fn commit_ready_url(
+    lifecycle: &Mutex<()>,
+    child_cell: &Mutex<Option<ManagedChild>>,
+    ready_url: &Mutex<Option<Url>>,
+    generation: &AtomicU64,
+    expected_generation: u64,
+    expected_child_id: u32,
+    url: Url,
+) -> bool {
+    let _lifecycle = lifecycle.lock().unwrap();
+    if !watcher_generation_is_current(generation, expected_generation) {
+        return false;
+    }
+    let mut child_guard = child_cell.lock().unwrap();
+    let Some(child) = child_guard.as_mut() else {
+        return false;
+    };
+    if child.id() != expected_child_id || !matches!(child.try_wait(), Ok(None)) {
+        return false;
+    }
+    *ready_url.lock().unwrap() = Some(url);
+    true
+}
+
+fn clear_ready_if_current(
+    lifecycle: &Mutex<()>,
+    child_cell: &Mutex<Option<ManagedChild>>,
+    ready_url: &Mutex<Option<Url>>,
+    generation: &AtomicU64,
+    expected_generation: u64,
+    expected_child_id: u32,
+) {
+    let _lifecycle = lifecycle.lock().unwrap();
+    if !watcher_generation_is_current(generation, expected_generation) {
+        return;
+    }
+    let mut child_guard = child_cell.lock().unwrap();
+    let Some(child) = child_guard.as_mut() else {
+        return;
+    };
+    if child.id() == expected_child_id && matches!(child.try_wait(), Ok(None)) {
+        *ready_url.lock().unwrap() = None;
     }
 }
 
@@ -1096,6 +1344,33 @@ fn write_record(record_path: &Path, pid: u32, port: u16, group_id: Option<u32>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_before_child_registration_rejects_the_new_process() {
+        let lifecycle = Mutex::new(());
+        let child_cell = Mutex::new(None);
+        let desired_running = AtomicBool::new(true);
+        let generation = AtomicU64::new(7);
+
+        let _lifecycle = lifecycle.lock().unwrap();
+        desired_running.store(false, Ordering::SeqCst);
+        assert!(register_child_locked(&child_cell, &desired_running, &generation, 7, 42_u32,).is_err());
+        assert!(child_cell.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn restart_invalidates_old_spawn_epoch_and_watcher_generation() {
+        let generation = AtomicU64::new(11);
+        let old_epoch = generation.load(Ordering::SeqCst);
+
+        invalidate_generation(&generation);
+
+        assert!(!watcher_generation_is_current(&generation, old_epoch));
+        assert!(watcher_generation_is_current(
+            &generation,
+            generation.load(Ordering::SeqCst)
+        ));
+    }
 
     #[test]
     fn probes_forward_ports() {

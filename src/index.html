@@ -2,14 +2,51 @@
 <html lang="zh-Hans">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSH Launcher</title>
+    <link rel="stylesheet" href="./dsh-tokens.css" />
+    <link rel="stylesheet" href="./startup.css" />
   </head>
   <body>
-    <!--
-      DSH Launcher 没有窗口,只有一个托盘图标——这个页面不会被打开。
-      它存在只是因为 tauri.conf.json 的 build.frontendDist 需要指向点什么。
-      以后如果加设置窗口之类的界面,从这里开始写。
-    -->
-    <p>DSH Launcher 在菜单栏运行,这个页面平时不会显示。</p>
+    <main class="startup-shell" aria-labelledby="startup-title">
+      <header class="current-state">
+        <span id="state-symbol" class="state-symbol busy" aria-hidden="true"></span>
+        <div class="state-copy" role="status" aria-live="polite" aria-atomic="true">
+          <h1 id="startup-title">正在准备启动环境…</h1>
+          <p id="startup-summary"><span>正在读取配置，检查外部运行环境。</span><span>这通常只需要几秒钟。</span></p>
+        </div>
+      </header>
+
+      <p id="connection-error" class="connection-error" role="alert" hidden></p>
+      <p id="elapsed-time" class="elapsed-time">已用时 0 秒</p>
+
+      <details id="startup-details" class="startup-details">
+        <summary>
+          <svg class="disclosure-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+          <span id="details-label">启动详情</span>
+          <span id="detail-count" class="detail-count">0 / 3 已完成</span>
+        </summary>
+        <div class="detail-body">
+          <ol class="history" aria-label="启动步骤">
+            <li class="startup-step"><span class="step-symbol" aria-hidden="true"></span><span>初始化环境</span><span class="step-meta">待处理</span></li>
+            <li class="startup-step"><span class="step-symbol" aria-hidden="true"></span><span>检查构建许可</span><span class="step-meta">待处理</span></li>
+            <li class="startup-step"><span class="step-symbol" aria-hidden="true"></span><span>启动本地服务</span><span class="step-meta">待处理</span></li>
+          </ol>
+          <pre id="technical-detail" class="technical-detail" tabindex="0" aria-label="当前阶段详情" hidden></pre>
+          <button type="button" class="detail-link" data-action="logs" disabled>打开日志 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10" /></svg></button>
+        </div>
+      </details>
+
+      <footer class="startup-footer">
+        <div class="startup-actions" aria-label="启动操作">
+          <button type="button" class="button button-secondary" data-action="config" hidden>编辑配置</button>
+          <button type="button" class="button button-primary" data-action="retry" hidden>重试</button>
+          <button type="button" class="button button-secondary" data-action="background" disabled>后台继续</button>
+          <p id="ready-note" class="ready-note" hidden>就绪后自动关闭</p>
+        </div>
+        <p id="action-error" class="action-error" role="alert" hidden></p>
+      </footer>
+    </main>
+    <script src="./startup.js"></script>
   </body>
 </html>

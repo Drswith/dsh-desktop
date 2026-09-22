@@ -1,0 +1,91 @@
+/*
+ * Minimal static subset of the DSH Web design tokens.
+ *
+ * Read-only source of truth (not a build/runtime dependency):
+ * - packages/client/ui-theme/src/styles/base.css
+ *   commit 3ee2982f853946cef8f567fa5c9207f3306e2d42
+ * - packages/client/ui-theme/src/styles/design-platform.css
+ *   commit 8ffdee4fe5d86cd1e4695a2b3ae14183c8319cdd
+ * - packages/client/ui-primitives/src/Button.module.css
+ *   commit 7020c7e122190a2c164910f0847c53749995f369
+ * - packages/client/web/src/base.css
+ *   commit 1c808341ecdd7aad6058746cec19b238c92946f5
+ *
+ * Values are intentionally limited to this framework-free startup window;
+ * this is not a copy of the compiled theme. The reference repository and
+ * these source packages are MIT licensed (Copyright (c) 2026 DeepSeek).
+ * No third-party fonts or assets are bundled.
+ */
+
+:root {
+  --dsh-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+  /* --dsw-alias-bg-base / --dsw-static-neutral-bluish-00 */
+  --dsh-bg-base: rgb(255 255 255);
+  /* --dsw-alias-label-primary / --dsw-static-neutral-bluish-1000 */
+  --dsh-label-primary: rgb(15 17 21);
+  /* --dsw-alias-label-secondary / --dsw-static-neutral-bluish-700 */
+  --dsh-label-secondary: rgb(97 102 107);
+  /* --dsw-alias-label-tertiary / --dsw-static-neutral-bluish-600 */
+  --dsh-label-tertiary: rgb(129 133 140);
+  /* --dsw-alias-label-primary-foreground */
+  --dsh-label-primary-foreground: rgb(255 255 255);
+
+  /* --dsw-alias-border-l2 / --dsw-alias-border-l3 */
+  --dsh-border: rgb(0 0 0 / 10%);
+  --dsh-border-strong: rgb(0 0 0 / 12%);
+  /* --dsw-alias-interactive-bg-hover */
+  --dsh-interactive-hover: rgb(38 49 72 / 6%);
+
+  /* --dsw-alias-brand-primary / --dsw-alias-button-primary-* */
+  --dsh-button-primary-fill: rgb(15 17 21);
+  --dsh-button-primary-hover: rgb(67 69 74);
+  /* --dsw-alias-link / --dsw-alias-state-business-primary */
+  --dsh-business: rgb(65 118 230);
+  --dsh-business-hover: rgb(103 158 254);
+  /* --dsw-alias-state-error-* */
+  --dsh-error: rgb(236 19 19);
+  --dsh-error-secondary: rgb(242 90 90);
+  --dsh-error-background: rgb(236 19 19 / 5%);
+  /* --dsw-alias-state-success-primary */
+  --dsh-success: rgb(34 197 94);
+  --dsh-progress-track: rgb(235 238 242);
+
+  /* Button.module.css: h36, pad 14/7, gap 4, r18, font 14/22. */
+  --dsh-control-height: 36px;
+  --dsh-control-padding-inline: 14px;
+  --dsh-control-gap: 4px;
+  --dsh-control-radius: 18px;
+  --dsh-control-font-size: 14px;
+  --dsh-control-line-height: 22px;
+  --dsh-transition-fast: 0.1s;
+}
+
+@supports (corner-shape: superellipse(1.5)) {
+  :root {
+    --dsh-corner-shape: superellipse(1.5);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Values mirror body[data-ds-dark-theme] in design-platform.css. */
+    --dsh-bg-base: rgb(21 21 23);
+    --dsh-label-primary: rgb(249 250 251);
+    --dsh-label-secondary: rgb(207 211 214);
+    --dsh-label-tertiary: rgb(173 178 184);
+    --dsh-label-primary-foreground: rgb(15 17 21);
+    --dsh-border: rgb(255 255 255 / 12%);
+    --dsh-border-strong: rgb(255 255 255 / 16%);
+    --dsh-interactive-hover: rgb(255 255 255 / 8%);
+    --dsh-button-primary-fill: rgb(249 250 251);
+    --dsh-button-primary-hover: rgb(235 238 242);
+    --dsh-business: rgb(103 158 254);
+    --dsh-business-hover: rgb(65 118 230);
+    --dsh-error: rgb(242 90 90);
+    --dsh-error-secondary: rgb(242 90 90);
+    --dsh-error-background: rgb(242 90 90 / 15%);
+    --dsh-success: rgb(34 197 94);
+    --dsh-progress-track: rgb(53 54 56);
+  }
+}
