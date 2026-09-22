@@ -12,14 +12,29 @@ DSH 的托盘启动器：[Tauri 2](https://tauri.app) 写的小外壳，启动�
 
 1. 启动时先看一眼上次有没有遗留的 Runner 进程组，有就先清掉，再按 `~/.dsh-launcher/config.json` 默认构造 `pnpm dlx @deepseek-ai/dsh@固定版本 --profile … --no-open --host 127.0.0.1 --port …`；首选端口被占用时顺延最多 20 个端口；
 2. 常驻一个托盘图标和菜单，可以启动、停止、重启 dsh，打开浏览器、复制访问链接、编辑配置、打开日志、打开 DSH 数据目录、管理登录启动、切换 Dock 图标和查看 About；菜单还会动态显示状态错误与外部 runtime 摘要；
-3. 从子进程 stdout 里认出 `dsh web: http://127.0.0.1:<port>/?token=…` 这行就绪信号后，菜单项从禁用的「启动中…」变成可点的「打开 DSH」，正常启动会自动打开默认浏览器，点击菜单也可以再次打开；初次启动失败会主动弹出原因和配置入口，不必先点击托盘；首次启动和手动启动/重启会通过通知提示“正在初始化”“检查构建许可”（如需）和“正在启动”，就绪后发一次“已就绪”通知；启动超过 5 秒还会发一次“仍在启动”提醒，看门狗自动重试不会重复刷通知；
+3. 启动时尽早显示短生命周期的进度窗口，持续显示初始化、构建许可检查/待确认、服务启动、就绪或失败；从 stdout 认出 `dsh web: http://127.0.0.1:<port>/?token=…` 后自动打开默认浏览器，约 1.2 秒后销毁进度窗口。失败时窗口保留重试、配置和日志入口；转入后台后保留通知兜底，看门狗自动重试不会反复弹出窗口；
 4. 看门狗会在 180 秒内未就绪、进程异常退出或连续 3 次 HTTP 健康探测失败时重启，使用 1/2/5/10/30 秒退避，并在 10 分钟内 5 次失败后熔断；
 5. 支持 `dsh-launcher://open|start|stop|restart|logs` 深链接，macOS 应用包会注册 `dsh-launcher` scheme，Windows/Linux 由 deep-link + single-instance 转发到已有实例；
 6. 把 dsh stdout/stderr 写入 `~/.dsh-launcher/logs/dsh.log`，启动器行为写入 `launcher.log`，日志中的 token 会脱敏；
 7. 点「退出」会先弹一个确认框，确认后才真的停掉 `dsh` 子进程、退出外壳；也可以选择「退出且不再询问」，偏好写入 `~/.dsh-launcher/preferences.json`。
 8. About 会显示版本、构建号、commit、构建时间、Runner 使用的 DSH 包规格、`node --version`、`pnpm --version` 和系统架构；登录启动使用 Tauri 官方 autostart 插件，在 macOS 首次从 `/Applications` 启动时自动开启。
 
-**用的都是 Tauri 官方 API/插件**（`tauri::tray`/`tauri::menu` 建托盘和菜单，`tauri::AppHandle::set_activation_policy` 控制 macOS Dock 显示，`tauri-plugin-opener` 开浏览器并定位日志文件，`tauri-plugin-dialog` 弹退出确认框、配置错误和 About，`tauri-plugin-notification` 发启动阶段、慢启动和就绪通知，`tauri-plugin-autostart` 管理登录启动，`tauri-plugin-store` 保存用户偏好，`tauri-plugin-single-instance` 防止开两份；进程树管理在 Unix 上用独立进程组，在 Windows 上用 Job Object，孤儿记录检测用了 [`sysinfo`](https://crates.io/crates/sysinfo)），没有新增 webview，也没有直接调用 AppKit 原生 API，理论上能跨平台编译——CI 会在 macOS / Windows / Linux 上各跑一次 `cargo check` 确认这件事，但**只在 macOS 上真正跑过、点过**。
+**使用 Tauri 官方 API/插件**：`WebviewWindowBuilder` 提供启动进度窗口，`tauri::tray`/`tauri::menu` 建托盘和菜单，`tauri::AppHandle::set_activation_policy` 控制 macOS Dock 显示，`tauri-plugin-opener` 开浏览器并定位日志文件，`tauri-plugin-dialog` 保留退出确认、构建许可、配置错误和 About，`tauri-plugin-notification` 提供窗口转入后台后的通知兜底，`tauri-plugin-autostart` 管理登录启动，`tauri-plugin-store` 保存用户偏好，`tauri-plugin-single-instance` 防止开两份。进程树管理在 Unix 上用独立进程组，在 Windows 上用 Job Object，孤儿记录检测使用 [`sysinfo`](https://crates.io/crates/sysinfo)。没有直接调用 AppKit 原生 API；CI 配置包含三平台 `cargo check`，但**只在 macOS 上真正跑过、点过**，配置了 CI 不等于本分支已经通过三平台验证。
+
+### 启动进度窗口
+
+- 先创建窗口，再在后台进行孤儿清理、登录 shell 环境读取和 Runner 启动。窗口展示真实阶段与等待时间，不伪造下载百分比。
+- 构建许可仍由原有系统对话框明确确认；进度窗口只显示“等待确认”，不能绕过授权。
+- 当前阶段是视觉中心；历史步骤、技术详情和日志入口收进可展开的“启动详情”。窗口默认内容区 440×278，展开后使用 Tauri API 按内容增高；超长技术文本局部滚动。
+- 关闭窗口或点击“后台继续”会销毁 Webview，而不是隐藏；不停止 DSH，也不退出托盘。菜单“查看启动进度…”可按需重新创建窗口；手动启动/重启也会显示它。
+- 就绪时短暂展示结果后销毁窗口。自动关闭任务绑定状态版本，不会误关下一次重启的窗口。Webview 被销毁不等于系统渲染进程立即回收全部内存，峰值和回收情况需要实测。
+- 可见窗口承担阶段反馈，不重复堆叠通知；转入后台时继续使用阶段/慢启动/就绪通知和必要的错误对话框。系统通知仍受系统权限、专注模式等影响。
+- 前端仅为静态 HTML/CSS/JS，没有 React、Vite、npm 安装或前端编译步骤。样式复用 DSH Web UI 的最小设计 token 和按钮规则；参考源及 MIT 许可见 `src/dsh-tokens.css` 和 `src/third-party-notices.txt`，不依赖另一份源码目录存在。
+- 沿用 DSH 的系统字体、黑白主按钮、36px 控件高度和 18px 胶囊圆角；启动窗口补充 88px 按钮最小宽度，避免“重试”比四字操作明显窄。主题跟随系统；DSH 网页内部手动选择的主题不会跨进程同步。
+- 窗口只加载内置本地页面，禁止外部导航；IPC 只允许读取进度、限幅调整当前窗口高度和固定的日志/配置/重试/后台/浏览器动作，不接收任意命令、路径或 URL，不把 DSH token 交给前端。
+
+设计来源、验收边界、内存实测及 Swift 差异见[启动窗口验证记录](docs/startup-window-verification.md)。
+已确认、不会参与应用打包的交互设计原型保留在[docs/design/startup-window-prototype](docs/design/startup-window-prototype/)。
 
 本项目之前有一版完整搬过 Swift 版能力的实现（运行时安装/校验/原子升级、崩溃看门狗、登录启动、Dock 右键菜单、多语言、About 窗口……大量直接调用 AppKit 的 Rust 代码），复杂度和"托盘 + 启动一个进程"这个目标不成比例，已经推倒重来。历史实现留在 git 历史里（`wip: objc2 直写 AppKit 的 Tauri 重构` 那次提交之前），以后要按需加什么功能可以回去参考，但不建议整体恢复。
 
@@ -34,7 +49,7 @@ DSH 的托盘启动器：[Tauri 2](https://tauri.app) 写的小外壳，启动�
 - **退出确认框同一时间只能有一个**：连点几下托盘「退出」不会堆出好几个确认框——这是手工测试时真堆出来过之后加的保护（一个 `AtomicBool` 标志位），不是预防性写的。弹窗用的是 `tauri-plugin-dialog` 的非阻塞 `.show(回调)`，不是 `blocking_show()`：那个方法文档明确写了不能在主线程调用，之前手写 AppKit 弹窗时在主线程同步等过一次，直接死锁过，这次注意避开了。
 - **没有 Dock 右键菜单、多语言和系统唤醒宽限**：Dock 图标显示/隐藏已经通过 Tauri 的 activation policy 菜单项实现；登录启动已经通过跨平台 autostart 插件实现，但 macOS 底层是 LaunchAgent，不承诺与 Swift 的 `SMAppService` 设置界面完全一致。
 - **About 不包含 Swift 版的 bundled runtime receipt**：本项目有意不在应用内管理 runtime；Node.js 和 pnpm 版本会从配置的 Node 路径或登录 shell 的 `PATH` 中读取。
-- **About 使用 `tauri-plugin-dialog` 的系统消息框**：macOS 标准消息框会显示系统提示图标，不支持替换成应用图标；若要使用应用图标，需要改用原生 AppKit alert 或新增自定义窗口，这超出当前“不新增 webview、只用 Tauri API”的范围。
+- **About 继续使用 `tauri-plugin-dialog` 的系统消息框**：macOS 标准消息框显示系统提示图标。新增的 Webview 仅服务于启动进度，不将 About 改成另一个 Webview。
 
 ### 启动配置
 
@@ -73,6 +88,7 @@ DSH 的托盘启动器：[Tauri 2](https://tauri.app) 写的小外壳，启动�
 指定一个绝对路径作为单次测试的数据目录；关闭启动器后可以安全删除对应测试目录，
 不会影响正式构建的配置、日志和偏好。测试包的应用图标和菜单栏图标会带琥珀色 `T`
 标记，正式包仍使用原始图标；测试构建还会关闭 macOS 模板图标着色，以保留这个标记。
+带 `DSH_LAUNCHER_TEST_BUILD=1` 的 Release 优化测试包也使用开发数据目录，不会因关闭 Debug 断言而切回正式配置。
 
 macOS 从 Finder 启动时不保证继承交互式终端的 PATH；如果菜单里的运行时摘要能看到
 pnpm，但启动仍提示找不到命令，建议把 `runner.command` 写成 pnpm 的绝对路径。启动器
@@ -101,7 +117,7 @@ mise run clean        # 清掉 target / gen
 ## 代码结构
 
 ```
-src/                    静态占位页面——没有窗口，这个页面平时不会被打开
+src/                    启动窗口的静态 HTML/CSS/JS 和最小 DSH 设计 token
 src-tauri/
   src/
     main.rs             入口
@@ -112,9 +128,10 @@ src-tauri/
     logging.rs            launcher/dsh 持久化日志与 token 脱敏
     process_tree.rs      Unix 进程组 / Windows Job Object 的平台封装
     ready_line.rs         解析 `dsh web: http://…/?token=…` 这一行
+    startup.rs           进度快照、受限 IPC、窗口创建和销毁
   icons/                 沿用自 Swift 版的图标；layers/ 是设计源文件，AppIcon.png 是拿来跑
                           `tauri icon` 重新生成整套图标用的 1024px 源图
-  capabilities/          Tauri 权限声明（当前没有窗口，基本用不上）
+  capabilities/          启动窗口最小权限（仅订阅状态事件）
 ```
 
 ## 许可证

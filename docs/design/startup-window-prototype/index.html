@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-Hans" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>DSH Launcher · 启动窗口设计原型</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./prototype.css">
+    <script src="./prototype.js" defer></script>
+  </head>
+  <body>
+    <header class="studio-header">
+      <div>
+        <h1>启动窗口原型</h1>
+        <p>独立设计预览。所有操作均为模拟，不启动服务、不读取或修改配置。</p>
+      </div>
+      <label class="theme-control">外观
+        <select id="theme-control">
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+          <option value="system">跟随系统</option>
+        </select>
+      </label>
+    </header>
+
+    <main class="studio-main">
+      <div class="studio-toolbar">
+        <div class="view-controls" role="group" aria-label="预览方式">
+          <button type="button" data-view="interactive" aria-pressed="true">交互预览</button>
+          <button type="button" data-view="board" aria-pressed="false">状态总览</button>
+        </div>
+        <div class="play-controls">
+          <button type="button" id="play-flow">播放完整流程</button>
+          <button type="button" id="confirm-approval" hidden>模拟已确认许可</button>
+        </div>
+      </div>
+
+      <div class="state-controls" role="group" aria-label="模拟启动阶段">
+        <button type="button" data-phase="initializing" aria-pressed="false">初始化</button>
+        <button type="button" data-phase="checking" aria-pressed="false">检查依赖</button>
+        <button type="button" data-phase="approval" aria-pressed="false">等待确认</button>
+        <button type="button" data-phase="starting" aria-pressed="true">启动中</button>
+        <button type="button" data-phase="failed" aria-pressed="false">启动失败</button>
+        <button type="button" data-phase="ready" aria-pressed="false">已就绪</button>
+      </div>
+
+      <section id="preview-stage" class="preview-stage" aria-label="启动窗口模拟"></section>
+      <p id="preview-note" class="preview-note" role="status" aria-live="polite"></p>
+      <footer class="studio-footer">
+        <span>窗口宽 440px · 按钮最小宽度 88px · 静态 HTML / CSS / JS</span>
+        <span>窗口边框及红绿灯为预览模拟，接入时保留系统标题栏。</span>
+      </footer>
+    </main>
+
+    <dialog id="simulation-dialog" aria-labelledby="simulation-title">
+      <form method="dialog">
+        <h2 id="simulation-title"></h2>
+        <p id="simulation-description"></p>
+        <pre id="simulation-content" hidden></pre>
+        <div class="dialog-actions"><button class="button primary" value="close">知道了</button></div>
+      </form>
+    </dialog>
+  </body>
+</html>
